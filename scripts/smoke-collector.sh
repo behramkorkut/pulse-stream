@@ -5,7 +5,7 @@
 
 base="${1:-http://localhost:8080}"
 now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-id="smoke-$(date +%s)"
+run="smoke-$(date +%s)"
 
 call() {
   local label="$1"
@@ -15,13 +15,19 @@ call() {
   echo
 }
 
+# event <suffixe-id> <visiteur> <page>
+event() {
+  printf '{"id":"%s-%s","type":"pageview","site_id":"site-42","visitor_id":"%s","url":"https://example.com/%s","timestamp":"%s"}' \
+    "$run" "$1" "$2" "$3" "$now"
+}
+
 call "healthz (attendu : 200)" "$base/healthz"
 
-call "événement valide (attendu : 202)" -X POST "$base/collect" \
-  -d "{\"id\":\"$id\",\"type\":\"pageview\",\"site_id\":\"site-42\",\"visitor_id\":\"v-1\",\"url\":\"https://example.com/\",\"timestamp\":\"$now\"}"
+call "événement valide, visiteur v-1 (attendu : 202)" -X POST "$base/collect" -d "$(event 1 v-1 accueil)"
+call "événement valide, visiteur v-1 encore (attendu : 202)" -X POST "$base/collect" -d "$(event 2 v-1 panier)"
+call "événement valide, visiteur v-2 (attendu : 202)" -X POST "$base/collect" -d "$(event 3 v-2 accueil)"
 
-call "événement invalide (attendu : 422)" -X POST "$base/collect" \
-  -d '{"id":"x","type":"scroll"}'
+call "événement invalide (attendu : 422)" -X POST "$base/collect" -d '{"id":"x","type":"scroll"}'
 
 call "JSON cassé (attendu : 400)" -X POST "$base/collect" -d '{oops'
 

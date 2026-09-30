@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,9 +34,22 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	pub, closePub, err := newPublisher(ctx, log)
+	if err != nil {
+		return err
+	}
+	// Ce defer s'exécute au retour de run(), donc APRÈS srv.Shutdown : on arrête d'abord d'accepter
+	// des requêtes, puis on vide les lots Kafka en attente. Dans l'ordre inverse, des requêtes
+	// en cours écriraient dans un producteur déjà fermé.
+	defer func() {
+		if err := closePub(); err != nil {
+			log.Error("closing publisher", slog.Any("error", err))
+		}
+	}()
+
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: collector.NewHandler(collector.NewLogPublisher(log), log),
+		Handler: collector.NewHandler(pub, log),
 		// Sans ces délais, un client lent ou malveillant peut garder une connexion ouverte indéfiniment.
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
@@ -70,9 +84,46 @@ func run() error {
 	return nil
 }
 
+// newPublisher choisit la destination des événements selon PUBLISHER (kafka par défaut, ou log
+// pour développer sans infrastructure). Elle retourne aussi la fonction de fermeture à appeler à l'arrêt.
+func newPublisher(ctx context.Context, log *slog.Logger) (collector.Publisher, func() error, error) {
+	switch mode := getenv("PUBLISHER", "kafka"); mode {
+	case "log":
+		log.Warn("PUBLISHER=log : les événements ne sont PAS envoyés à Kafka")
+		return collector.NewLogPublisher(log), func() error { return nil }, nil
+
+	case "kafka":
+		brokers := splitCSV(getenv("KAFKA_BROKERS", "localhost:19092"))
+		topic := getenv("KAFKA_TOPIC", "raw-events")
+
+		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := collector.CheckTopic(checkCtx, brokers, topic); err != nil {
+			return nil, nil, fmt.Errorf("kafka not ready: %w", err)
+		}
+
+		log.Info("publishing to kafka", slog.Any("brokers", brokers), slog.String("topic", topic))
+		p := collector.NewKafkaPublisher(brokers, topic)
+		return p, p.Close, nil
+
+	default:
+		return nil, nil, fmt.Errorf("unknown PUBLISHER %q (expected kafka or log)", mode)
+	}
+}
+
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return fallback
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }

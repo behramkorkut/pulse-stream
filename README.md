@@ -41,6 +41,9 @@ make test     # tests Go (avec détection de data races)
 make build    # compile les binaires dans ./bin
 make run-collector  # lance le collector sur :8080
 make smoke    # requêtes de test sur le collector
+make topics   # crée les topics Kafka
+make consume  # lit le topic raw-events
+make test-integration  # tests avec un vrai broker
 make up       # démarre Redpanda, Redis, MongoDB
 make down     # arrête l'infrastructure
 ```
@@ -52,4 +55,5 @@ Le journal de développement détaillé est dans `journaldedev.md`.
 | Palier | Contenu | État |
 |---|---|---|
 | 0 | Squelette, outillage, infrastructure locale | terminé |
-| 1 | Collector HTTP : réception, validation, arrêt propre | en cours |
+| 1 | Collector HTTP : réception, validation, arrêt propre | terminé |
+| 2 | Producer Kafka, topics, clé de partitionnement | en cours |

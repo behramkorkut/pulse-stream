@@ -18,6 +18,15 @@
 | `enriched-events` | Événements validés, enrichis, avec identifiant de session |
 | `dead-letter` | Événements rejetés, avec la raison du rejet |
 
+## Clé de partitionnement de `raw-events`
+
+La clé est `site_id/visitor_id`, hachée avec Murmur2 (comme le client Java officiel).
+
+- Kafka garantit l'ordre **à l'intérieur d'une partition** : tous les événements d'un visiteur restent donc ordonnés.
+- Le processor pourra calculer les sessions sans coordination entre workers : un visiteur = une partition = un consommateur.
+- Une clé par `site_id` seul créerait des partitions chaudes (un gros site sature une seule partition).
+- Le topic a 6 partitions : jusqu'à 6 consommateurs en parallèle dans un même groupe.
+
 ## Principes de conception
 
 - **Au moins une fois** côté Kafka, rendu sûr par l'**idempotence** (un identifiant unique par événement).
