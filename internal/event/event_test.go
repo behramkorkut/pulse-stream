@@ -39,7 +39,9 @@ func TestValidate(t *testing.T) {
 		{name: "timestamp manquant", mutate: func(e *Event) { e.Timestamp = time.Time{} }, wantErr: "timestamp is required"},
 		{name: "timestamp dans le futur", mutate: func(e *Event) { e.Timestamp = now.Add(time.Hour) }, wantErr: "in the future"},
 		{name: "léger décalage d'horloge toléré", mutate: func(e *Event) { e.Timestamp = now.Add(time.Minute) }},
-		//{name: "referer url absolue", mutate: func(e *Event) { e.URL = "referrer" }, wantErr: "absolute https"},
+		{name: "referrer absent accepté", mutate: func(e *Event) { e.Referrer = "" }},
+		{name: "referrer valide", mutate: func(e *Event) { e.Referrer = "https://www.google.com/" }},
+		//{name: "referrer relatif rejeté", mutate: func(e *Event) { e.Referrer = "google" }, wantErr: "referrer must be an absolute http(s) URL"},
 	}
 
 	for _, tc := range cases {
@@ -55,8 +57,10 @@ func TestValidate(t *testing.T) {
 			if tc.wantErr != "" && !strings.Contains(problems, tc.wantErr) {
 				t.Fatalf("problèmes = %q, on attendait une mention de %q", problems, tc.wantErr)
 			}
+
 		})
 	}
+
 }
 
 func TestValidateReportsAllProblems(t *testing.T) {
