@@ -13,4 +13,8 @@ type Enriched struct {
 	Device      string    `json:"device"`       // desktop, mobile, tablet, bot
 	IsBot       bool      `json:"is_bot"`       // trafic automatisé détecté par heuristique sur le user-agent
 	ProcessedAt time.Time `json:"processed_at"` // instant du traitement par le processor
+
+	// Session du visiteur (vide pour les robots, qui n'ont pas de session).
+	SessionID  string `json:"session_id,omitempty"`
+	NewSession bool   `json:"new_session"` // vrai pour l'événement qui ouvre la session
 }

@@ -16,10 +16,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 
 	"github.com/behramkorkut/pulse-stream/internal/event"
 	"github.com/behramkorkut/pulse-stream/internal/kafkautil"
+	"github.com/behramkorkut/pulse-stream/internal/sessions"
 )
 
 func integrationBrokers() []string {
@@ -99,8 +101,19 @@ func TestProcessorIntegration(t *testing.T) {
 	writer := NewWriter(brokers)
 	t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
 
+	// Redis : base numéro 15, réservée aux tests (elle est vidée).
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr, DB: 15})
+	t.Cleanup(func() { _ = rdb.Close() })
+	if err := rdb.FlushDB(ctx).Err(); err != nil {
+		t.Fatalf("Redis injoignable sur %s (make up ?) : %v", redisAddr, err)
+	}
+
 	runner := NewRunner(reader, writer,
-		Config{EnrichedTopic: enrichedTopic, DeadLetterTopic: deadTopic},
+		Config{EnrichedTopic: enrichedTopic, DeadLetterTopic: deadTopic, Sessions: sessions.NewRedis(rdb, sessions.DefaultTimeout)},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	runCtx, stopRunner := context.WithCancel(ctx)
@@ -119,8 +132,14 @@ func TestProcessorIntegration(t *testing.T) {
 	if h := byID["evt-human"]; h.IsBot || h.Browser != "chrome" {
 		t.Errorf("humain mal enrichi : %+v", h)
 	}
+	if h := byID["evt-human"]; h.SessionID == "" || !h.NewSession {
+		t.Errorf("l'humain doit ouvrir une session : id=%q new=%v", h.SessionID, h.NewSession)
+	}
 	if b := byID["evt-bot"]; !b.IsBot || b.Device != DeviceBot {
 		t.Errorf("robot mal enrichi : %+v", b)
+	}
+	if b := byID["evt-bot"]; b.SessionID != "" {
+		t.Errorf("un robot ne doit pas avoir de session, got %q", b.SessionID)
 	}
 
 	// Rejetés : JSON cassé et événement incomplet.

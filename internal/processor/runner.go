@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+
+	"github.com/behramkorkut/pulse-stream/internal/sessions"
 )
 
 // source est la partie de *kafka.Reader dont le runner a besoin.
@@ -28,11 +30,14 @@ type Config struct {
 	EnrichedTopic   string
 	DeadLetterTopic string
 
-	Workers          int           // goroutines de transformation (défaut : nombre de cœurs)
-	BatchSize        int           // taille maximale d'un lot (défaut : 200)
-	BatchWait        time.Duration // attente maximale pour remplir un lot (défaut : 50 ms)
-	MaxWriteAttempts int           // essais d'écriture avant d'abandonner (défaut : 5)
-	RetryBackoff     time.Duration // pause avant le 2e essai, doublée à chaque essai (défaut : 200 ms)
+	// Sessions rattache les événements des humains à leur session. nil : pas de sessions.
+	Sessions sessions.Store
+
+	Workers      int           // goroutines de transformation (défaut : nombre de cœurs)
+	BatchSize    int           // taille maximale d'un lot (défaut : 200)
+	BatchWait    time.Duration // attente maximale pour remplir un lot (défaut : 50 ms)
+	MaxAttempts  int           // essais (transformation, écriture) avant d'abandonner (défaut : 5)
+	RetryBackoff time.Duration // pause avant le 2e essai, doublée à chaque essai (défaut : 200 ms)
 }
 
 func (c Config) withDefaults() Config {
@@ -45,8 +50,8 @@ func (c Config) withDefaults() Config {
 	if c.BatchWait <= 0 {
 		c.BatchWait = 50 * time.Millisecond
 	}
-	if c.MaxWriteAttempts <= 0 {
-		c.MaxWriteAttempts = 5
+	if c.MaxAttempts <= 0 {
+		c.MaxAttempts = 5
 	}
 	if c.RetryBackoff <= 0 {
 		c.RetryBackoff = 200 * time.Millisecond
@@ -54,7 +59,7 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
-// batchDeadline borne le temps accordé à l'écriture et au commit d'un lot, y compris à l'arrêt.
+// batchDeadline borne le temps accordé au traitement d'un lot, y compris à l'arrêt.
 const batchDeadline = 15 * time.Second
 
 // Runner lit les messages bruts par lots, les transforme en parallèle, publie les résultats,
@@ -159,12 +164,14 @@ func collect(ch <-chan kafka.Message, max int, wait time.Duration) (batch []kafk
 
 // processBatch est le cœur de la garantie "au moins une fois" :
 //
-//  1. transformer le lot ;
+//  1. transformer le lot (validation, enrichissement, sessions) ;
 //  2. écrire TOUS les résultats dans Kafka (avec nouvelles tentatives) ;
 //  3. SEULEMENT ALORS valider les offsets d'entrée.
 //
 // Si le processus meurt entre 2 et 3, le lot sera relu et retraité : des doublons possibles,
 // mais aucune perte. Valider avant d'écrire ferait l'inverse : des pertes possibles.
+//
+// Retenter la transformation est sûr parce que le rattachement à une session est idempotent.
 func (r *Runner) processBatch(ctx context.Context, batch []kafka.Message) error {
 	// Le lot en cours doit aller au bout même si un arrêt a été demandé : on détache son contexte
 	// de l'annulation, en lui imposant tout de même une échéance.
@@ -172,7 +179,15 @@ func (r *Runner) processBatch(ctx context.Context, batch []kafka.Message) error 
 	defer cancel()
 
 	start := time.Now()
-	outs := r.transformBatch(batch)
+
+	var outs []Output
+	err := r.retry(ctx, "transform batch", func() (err error) {
+		outs, err = r.transformBatch(ctx, batch)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("transform batch: %w", err)
+	}
 
 	msgs := make([]kafka.Message, 0, len(batch))
 	dead := 0
@@ -185,7 +200,8 @@ func (r *Runner) processBatch(ctx context.Context, batch []kafka.Message) error 
 		msgs = append(msgs, kafka.Message{Topic: topic, Key: batch[i].Key, Value: out.Value})
 	}
 
-	if err := r.writeWithRetry(ctx, msgs); err != nil {
+	err = r.retry(ctx, "write batch", func() error { return r.dst.WriteMessages(ctx, msgs...) })
+	if err != nil {
 		return fmt.Errorf("write batch: %w", err)
 	}
 	if err := r.src.CommitMessages(ctx, batch...); err != nil {
@@ -195,7 +211,7 @@ func (r *Runner) processBatch(ctx context.Context, batch []kafka.Message) error 
 	r.log.Info("batch processed",
 		slog.Int("messages", len(batch)),
 		slog.Int("dead_letter", dead),
-		slog.Duration("took", time.Since(start)),
+		slog.Float64("took_ms", float64(time.Since(start).Microseconds())/1000),
 	)
 	return nil
 }
@@ -204,9 +220,9 @@ func (r *Runner) processBatch(ctx context.Context, batch []kafka.Message) error 
 //
 // Chaque message est affecté à un "shard" selon le hachage de sa clé : tous les messages d'un même
 // visiteur passent par la même goroutine, dans l'ordre. Les visiteurs différents avancent en parallèle.
-// Sans cela, deux événements du même visiteur pourraient être traités simultanément dans le
-// désordre, ce qui casserait le calcul des sessions (palier suivant).
-func (r *Runner) transformBatch(batch []kafka.Message) []Output {
+// C'est indispensable aux sessions : deux événements du même visiteur traités simultanément,
+// ou dans le désordre, fausseraient la détection des nouvelles sessions.
+func (r *Runner) transformBatch(ctx context.Context, batch []kafka.Message) ([]Output, error) {
 	now := r.now()
 	outs := make([]Output, len(batch))
 
@@ -216,23 +232,52 @@ func (r *Runner) transformBatch(batch []kafka.Message) []Output {
 		shards[s] = append(shards[s], i)
 	}
 
+	errs := make([]error, len(shards))
 	var wg sync.WaitGroup
-	for _, indexes := range shards {
+	for shard, indexes := range shards {
 		if len(indexes) == 0 {
 			continue
 		}
 		wg.Add(1)
-		go func(indexes []int) {
+		go func(shard int, indexes []int) {
 			defer wg.Done()
+			// Chaque goroutine n'écrit que dans ses propres cases (outs[i], errs[shard]) : pas de data race.
 			for _, i := range indexes {
 				m := batch[i]
-				// Chaque goroutine écrit dans des cases distinctes de outs : pas de data race.
-				outs[i] = Transform(m.Value, Source{Topic: m.Topic, Partition: m.Partition, Offset: m.Offset}, now)
+				src := Source{Topic: m.Topic, Partition: m.Partition, Offset: m.Offset}
+
+				res := Transform(m.Value, src, now)
+				if err := r.attachSession(ctx, res); err != nil {
+					errs[shard] = err
+					return
+				}
+				outs[i] = res.encode(m.Value, src, now)
 			}
-		}(indexes)
+		}(shard, indexes)
 	}
 	wg.Wait()
-	return outs
+
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return outs, nil
+}
+
+// attachSession rattache un événement valide à sa session. Les robots n'en ont pas : ils
+// gonfleraient inutilement Redis et fausseraient les statistiques de sessions.
+func (r *Runner) attachSession(ctx context.Context, res Result) error {
+	if r.cfg.Sessions == nil || res.Event == nil || res.Event.IsBot {
+		return nil
+	}
+	s, err := r.cfg.Sessions.Touch(ctx, res.Event.Event)
+	if err != nil {
+		return fmt.Errorf("session for event %s: %w", res.Event.ID, err)
+	}
+	res.Event.SessionID = s.ID
+	res.Event.NewSession = s.New
+	return nil
 }
 
 // shardOf associe une clé à un numéro de shard, de façon stable.
@@ -242,29 +287,31 @@ func shardOf(key []byte, shards int) int {
 	return int(h.Sum32() % uint32(shards))
 }
 
-// writeWithRetry réessaie l'écriture avec un délai croissant. Un échec partiel suivi d'un
-// nouvel essai peut dupliquer des messages : acceptable en "au moins une fois", à condition que
-// les consommateurs en aval dédoublonnent grâce à l'identifiant de l'événement.
-func (r *Runner) writeWithRetry(ctx context.Context, msgs []kafka.Message) error {
+// retry exécute fn jusqu'à MaxAttempts fois, avec un délai croissant entre les essais.
+// Un échec partiel suivi d'un nouvel essai peut dupliquer des messages : acceptable en
+// "au moins une fois", à condition que les consommateurs en aval dédoublonnent grâce à l'identifiant
+// de l'événement.
+func (r *Runner) retry(ctx context.Context, what string, fn func() error) error {
 	backoff := r.cfg.RetryBackoff
 
 	var err error
-	for attempt := 1; attempt <= r.cfg.MaxWriteAttempts; attempt++ {
-		if err = r.dst.WriteMessages(ctx, msgs...); err == nil {
+	for attempt := 1; attempt <= r.cfg.MaxAttempts; attempt++ {
+		if err = fn(); err == nil {
 			return nil
 		}
-		if attempt == r.cfg.MaxWriteAttempts {
+		if attempt == r.cfg.MaxAttempts {
 			break
 		}
-		r.log.Warn("write failed, retrying",
-			slog.Int("attempt", attempt), slog.Duration("backoff", backoff), slog.Any("error", err))
+		r.log.Warn("attempt failed, retrying",
+			slog.String("step", what), slog.Int("attempt", attempt),
+			slog.Duration("backoff", backoff), slog.Any("error", err))
 
 		select {
 		case <-time.After(backoff):
 			backoff *= 2
 		case <-ctx.Done():
-			return fmt.Errorf("%w (last write error: %v)", ctx.Err(), err)
+			return fmt.Errorf("%w (last error: %v)", ctx.Err(), err)
 		}
 	}
-	return fmt.Errorf("after %d attempts: %w", r.cfg.MaxWriteAttempts, err)
+	return fmt.Errorf("after %d attempts: %w", r.cfg.MaxAttempts, err)
 }

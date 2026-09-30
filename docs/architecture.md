@@ -41,6 +41,24 @@ des doublons possibles, jamais de perte (**au moins une fois**). Le dédoublonna
   c'est à l'agrégation de décider quoi compter.
 - Le processor est tolérant aux champs inconnus (contrairement au collector, strict à la frontière).
 
+## Sessions
+
+Une session regroupe les événements d'un visiteur (par site) espacés d'au plus 30 minutes. Trois choix structurants :
+
+- **Temps de l'événement**, pas de l'horloge : retraiter un arriéré donne les mêmes sessions qu'en temps réel.
+- **Identifiant déterministe** (empreinte du site, du visiteur et du premier événement) et drapeau
+  `new_session` calculé en comparant avec le premier événement mémorisé : traiter deux fois le même événement
+  donne exactement le même résultat (idempotence, indispensable en "au moins une fois").
+- **Atomicité** : la lecture et la mise à jour de l'état du visiteur se font dans un script Lua exécuté d'un
+  bloc par Redis, sans course possible entre deux instances du processor.
+
+Un événement en retard est rattaché à la session courante sans faire reculer le dernier instant vu. Les
+robots n'ont pas de session. Si Redis est indisponible, le lot est retenté puis le processor s'arrête sans
+avoir écrit ni validé : mieux vaut un retard qu'un événement publié sans session.
+
+Le magasin `Memory` sert de référence exécutable de la règle : les mêmes tests de contrat s'appliquent à
+`Memory` et à `Redis`.
+
 ## Principes de conception
 
 - **Au moins une fois** côté Kafka, rendu sûr par l'**idempotence** (un identifiant unique par événement).

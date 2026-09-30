@@ -14,6 +14,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"github.com/behramkorkut/pulse-stream/internal/event"
+	"github.com/behramkorkut/pulse-stream/internal/sessions"
 )
 
 const (
@@ -110,13 +111,13 @@ func (s *fakeSink) attemptCount() int {
 
 func testConfig() Config {
 	return Config{
-		EnrichedTopic:    testEnriched,
-		DeadLetterTopic:  testDead,
-		Workers:          4,
-		BatchSize:        50,
-		BatchWait:        20 * time.Millisecond,
-		MaxWriteAttempts: 3,
-		RetryBackoff:     time.Millisecond,
+		EnrichedTopic:   testEnriched,
+		DeadLetterTopic: testDead,
+		Workers:         4,
+		BatchSize:       50,
+		BatchWait:       20 * time.Millisecond,
+		MaxAttempts:     3,
+		RetryBackoff:    time.Millisecond,
 	}
 }
 
@@ -266,7 +267,7 @@ func TestRunnerDoesNotCommitWhenWriteKeepsFailing(t *testing.T) {
 		t.Fatal("Run() a réussi alors que l'écriture échoue toujours")
 	}
 	if got := dst.attemptCount(); got != 3 {
-		t.Errorf("%d tentatives, want MaxWriteAttempts = 3", got)
+		t.Errorf("%d tentatives, want MaxAttempts = 3", got)
 	}
 	if n := len(src.committed()); n != 0 {
 		t.Errorf("%d offsets validés malgré l'échec : des messages seraient perdus", n)
@@ -335,5 +336,150 @@ func TestShardOf(t *testing.T) {
 	}
 	if len(seen) < shards {
 		t.Errorf("seulement %d shards utilisés sur %d : mauvaise répartition", len(seen), shards)
+	}
+}
+
+// flakyStore simule un Redis instable : les failFirst premiers appels échouent (tous si failFirst < 0).
+type flakyStore struct {
+	mu        sync.Mutex
+	inner     sessions.Store
+	failFirst int
+	calls     int
+}
+
+func (f *flakyStore) Touch(ctx context.Context, e event.Event) (sessions.Session, error) {
+	f.mu.Lock()
+	f.calls++
+	fail := f.failFirst < 0 || f.calls <= f.failFirst
+	f.mu.Unlock()
+
+	if fail {
+		return sessions.Session{}, errors.New("redis indisponible")
+	}
+	return f.inner.Touch(ctx, e)
+}
+
+func decodeEnriched(t *testing.T, m kafka.Message) event.Enriched {
+	t.Helper()
+	var e event.Enriched
+	if err := json.Unmarshal(m.Value, &e); err != nil {
+		t.Fatalf("événement enrichi illisible : %v", err)
+	}
+	return e
+}
+
+func TestRunnerAssignsSessions(t *testing.T) {
+	at := func(hh, mm int) time.Time { return time.Date(2026, 9, 30, hh, mm, 0, 0, time.UTC) }
+	msgs := []kafka.Message{
+		kmsg(0, "site-42/v-1", rawEventAt("a", chromeUA, at(11, 0))),
+		kmsg(1, "site-42/v-1", rawEventAt("b", chromeUA, at(11, 10))),
+		kmsg(2, "site-42/v-2", rawEventAt("c", "curl/8.7.1", at(11, 20))), // robot
+		kmsg(3, "site-42/v-1", rawEventAt("d", chromeUA, at(11, 50))),     // 40 min d'inactivité
+	}
+	cfg := testConfig()
+	cfg.Sessions = sessions.NewMemory(sessions.DefaultTimeout)
+	r, src, dst := newTestRunner(msgs, cfg)
+	stop := startRunner(t, r)
+
+	waitFor(t, "les 4 offsets validés", func() bool { return len(src.committed()) == 4 })
+	if err := stop(); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	got := dst.messages()
+	a, b, c, d := decodeEnriched(t, got[0]), decodeEnriched(t, got[1]), decodeEnriched(t, got[2]), decodeEnriched(t, got[3])
+
+	if a.SessionID == "" || !a.NewSession {
+		t.Errorf("a = %+v, want une session neuve", a.SessionID)
+	}
+	if b.SessionID != a.SessionID || b.NewSession {
+		t.Errorf("b : session %q new=%v, want la session de a (%q), non neuve", b.SessionID, b.NewSession, a.SessionID)
+	}
+	if c.SessionID != "" || c.NewSession || !c.IsBot {
+		t.Errorf("c : un robot n'a pas de session, got %q new=%v bot=%v", c.SessionID, c.NewSession, c.IsBot)
+	}
+	if d.SessionID == a.SessionID || !d.NewSession {
+		t.Errorf("d : session %q new=%v, want une nouvelle session après 40 min d'inactivité", d.SessionID, d.NewSession)
+	}
+}
+
+// Ce test échouerait si deux événements d'un même visiteur étaient traités dans le désordre ou
+// en même temps : un seul événement doit ouvrir la session, tous les autres la rejoindre.
+func TestRunnerKeepsVisitorEventsOrderedForSessions(t *testing.T) {
+	const perVisitor = 40
+	var msgs []kafka.Message
+	for i := 0; i < perVisitor; i++ {
+		for _, visitor := range []string{"v-1", "v-2", "v-3", "v-4", "v-5"} {
+			ts := time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC).Add(time.Duration(i) * time.Minute)
+			id := fmt.Sprintf("%s-%02d", visitor, i)
+			msgs = append(msgs, kmsg(int64(len(msgs)), "site-42/"+visitor, rawEventFor(id, visitor, chromeUA, ts)))
+		}
+	}
+	cfg := testConfig()
+	cfg.Workers = 8
+	cfg.BatchSize = len(msgs) // un seul gros lot : le pire cas pour le parallélisme
+	cfg.Sessions = sessions.NewMemory(sessions.DefaultTimeout)
+	r, src, dst := newTestRunner(msgs, cfg)
+	stop := startRunner(t, r)
+
+	waitFor(t, "tous les offsets validés", func() bool { return len(src.committed()) == len(msgs) })
+	if err := stop(); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	newSessions := map[string]int{}
+	sessionOf := map[string]string{}
+	for _, m := range dst.messages() {
+		e := decodeEnriched(t, m)
+		if e.NewSession {
+			newSessions[e.VisitorID]++
+		}
+		if prev, ok := sessionOf[e.VisitorID]; ok && prev != e.SessionID {
+			t.Fatalf("visiteur %s : plusieurs sessions (%s et %s) alors que les événements sont espacés de 1 min",
+				e.VisitorID, prev, e.SessionID)
+		}
+		sessionOf[e.VisitorID] = e.SessionID
+	}
+	for visitor, n := range newSessions {
+		if n != 1 {
+			t.Errorf("visiteur %s : %d événements ouvrent une session, want 1", visitor, n)
+		}
+	}
+	if len(newSessions) != 5 {
+		t.Errorf("%d visiteurs avec une session, want 5", len(newSessions))
+	}
+}
+
+func TestRunnerRetriesWhenSessionStoreIsFlaky(t *testing.T) {
+	cfg := testConfig()
+	store := &flakyStore{inner: sessions.NewMemory(sessions.DefaultTimeout), failFirst: 2}
+	cfg.Sessions = store
+	r, src, dst := newTestRunner([]kafka.Message{kmsg(0, "site-42/v-1", rawEvent("evt-0", chromeUA))}, cfg)
+	stop := startRunner(t, r)
+
+	waitFor(t, "le commit après les nouveaux essais", func() bool { return len(src.committed()) == 1 })
+	if err := stop(); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	got := decodeEnriched(t, dst.messages()[0])
+	if got.SessionID == "" || !got.NewSession {
+		t.Errorf("session = %q new=%v, want une session neuve malgré les échecs", got.SessionID, got.NewSession)
+	}
+}
+
+func TestRunnerWritesAndCommitsNothingWhenSessionStoreIsDown(t *testing.T) {
+	cfg := testConfig()
+	cfg.Sessions = &flakyStore{inner: sessions.NewMemory(sessions.DefaultTimeout), failFirst: -1}
+	r, src, dst := newTestRunner([]kafka.Message{kmsg(0, "site-42/v-1", rawEvent("evt-0", chromeUA))}, cfg)
+
+	if err := r.Run(context.Background()); err == nil {
+		t.Fatal("Run() a réussi alors que le store de sessions est indisponible")
+	}
+	if n := len(dst.messages()); n != 0 {
+		t.Errorf("%d messages écrits sans session : un événement sans session serait publié à tort", n)
+	}
+	if n := len(src.committed()); n != 0 {
+		t.Errorf("%d offsets validés : les messages seraient perdus", n)
 	}
 }

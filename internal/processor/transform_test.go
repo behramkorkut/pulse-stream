@@ -13,13 +13,29 @@ var testNow = time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 
 const chromeUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+// transformJSON applique Transform puis la sérialisation, comme le fait le runner.
+func transformJSON(raw []byte, src Source) Output {
+	return Transform(raw, src, testNow).encode(raw, src, testNow)
+}
+
 func rawEvent(id, userAgent string) []byte {
-	return []byte(`{"id":"` + id + `","type":"pageview","site_id":"site-42","visitor_id":"v-1",` +
-		`"url":"https://example.com/","user_agent":"` + userAgent + `","timestamp":"2026-09-30T11:59:59Z"}`)
+	return rawEventAt(id, userAgent, time.Date(2026, 9, 30, 11, 59, 59, 0, time.UTC))
+}
+
+// rawEventAt fabrique un événement brut du visiteur "v-1".
+func rawEventAt(id, userAgent string, ts time.Time) []byte {
+	return rawEventFor(id, "v-1", userAgent, ts)
+}
+
+// rawEventFor fabrique un événement brut pour un visiteur donné. Les sessions se calculent sur le
+// visiteur du CORPS de l'événement ; la clé Kafka ne sert qu'au partitionnement et au shard.
+func rawEventFor(id, visitor, userAgent string, ts time.Time) []byte {
+	return []byte(`{"id":"` + id + `","type":"pageview","site_id":"site-42","visitor_id":"` + visitor + `",` +
+		`"url":"https://example.com/","user_agent":"` + userAgent + `","timestamp":"` + ts.Format(time.RFC3339) + `"}`)
 }
 
 func TestTransformEnrichesValidEvent(t *testing.T) {
-	out := Transform(rawEvent("evt-1", chromeUA), Source{}, testNow)
+	out := transformJSON(rawEvent("evt-1", chromeUA), Source{})
 
 	if out.Dead {
 		t.Fatalf("événement valide envoyé en dead-letter : %s", out.Value)
@@ -40,7 +56,7 @@ func TestTransformEnrichesValidEvent(t *testing.T) {
 }
 
 func TestTransformFlagsBotsButKeepsThem(t *testing.T) {
-	out := Transform(rawEvent("evt-bot", "Googlebot/2.1"), Source{}, testNow)
+	out := transformJSON(rawEvent("evt-bot", "Googlebot/2.1"), Source{})
 
 	var got event.Enriched
 	if out.Dead || json.Unmarshal(out.Value, &got) != nil {
@@ -55,7 +71,7 @@ func TestTransformToleratesUnknownFields(t *testing.T) {
 	raw := []byte(`{"id":"evt-1","type":"pageview","site_id":"s","visitor_id":"v","url":"https://e.com/",` +
 		`"timestamp":"2026-09-30T11:59:59Z","champ_du_futur":42}`)
 
-	if out := Transform(raw, Source{}, testNow); out.Dead {
+	if out := transformJSON(raw, Source{}); out.Dead {
 		t.Fatalf("un champ inconnu ne doit pas provoquer de rejet : %s", out.Value)
 	}
 }
@@ -84,7 +100,7 @@ func TestTransformRejections(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := Transform(tc.raw, src, testNow)
+			out := transformJSON(tc.raw, src)
 			if !out.Dead {
 				t.Fatalf("message invalide accepté : %s", out.Value)
 			}
@@ -115,7 +131,7 @@ func TestTransformRejections(t *testing.T) {
 func TestTransformTruncatesHugeRawInDeadLetter(t *testing.T) {
 	huge := []byte("{" + strings.Repeat("x", 100_000))
 
-	out := Transform(huge, Source{}, testNow)
+	out := transformJSON(huge, Source{})
 
 	var dl DeadLetter
 	if err := json.Unmarshal(out.Value, &dl); err != nil {
@@ -126,5 +142,17 @@ func TestTransformTruncatesHugeRawInDeadLetter(t *testing.T) {
 	}
 	if !strings.HasSuffix(dl.Raw, "(truncated)") {
 		t.Error("le message tronqué doit le signaler")
+	}
+}
+
+func TestTransformResultIsExclusive(t *testing.T) {
+	valid := Transform(rawEvent("evt-1", chromeUA), Source{}, testNow)
+	if valid.Event == nil || valid.Dead != nil {
+		t.Errorf("événement valide : %+v, want Event seul", valid)
+	}
+
+	invalid := Transform([]byte(`{oops`), Source{}, testNow)
+	if invalid.Event != nil || invalid.Dead == nil {
+		t.Errorf("message invalide : %+v, want Dead seul", invalid)
 	}
 }

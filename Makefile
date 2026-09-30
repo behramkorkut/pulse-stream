@@ -5,7 +5,7 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 TOPIC   ?= raw-events
 LDFLAGS := -X $(MODULE)/internal/version.Version=$(VERSION)
 
-.PHONY: help doctor fmt vet test test-integration build clean run-collector run-processor smoke poison topics consume group up down ps logs
+.PHONY: help doctor fmt vet test test-integration build clean run-collector run-processor smoke poison sessions demo-sessions topics consume group up down ps logs
 
 help: ## Affiche cette aide
 	grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -32,17 +32,23 @@ build: ## Compile les binaires dans ./bin
 clean: ## Supprime les binaires
 	rm -rf bin
 
-run-collector: ## Lance le collector en local (Ctrl+C pour l'arreter)
-	go run ./cmd/collector
+run-collector: build ## Lance le collector en local (Ctrl+C pour l'arreter)
+	./bin/collector
 
-run-processor: ## Lance le processor en local (Ctrl+C pour l'arreter)
-	go run ./cmd/processor
+run-processor: build ## Lance le processor en local (Ctrl+C pour l'arreter)
+	./bin/processor
 
 smoke: ## Test de fumee du collector (il doit deja tourner)
 	bash scripts/smoke-collector.sh
 
 poison: ## Publie 2 messages inexploitables dans raw-events (pour le dead-letter)
 	bash scripts/poison.sh
+
+sessions: ## Affiche quelques sessions actives dans Redis
+	bash scripts/sessions.sh
+
+demo-sessions: ## Envoie des evenements espaces dans le temps pour voir les sessions
+	bash scripts/sessions-demo.sh
 
 topics: ## Cree les topics Kafka (infrastructure demarree)
 	bash scripts/create-topics.sh
