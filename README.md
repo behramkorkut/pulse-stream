@@ -39,6 +39,8 @@ make help     # liste des commandes
 make doctor   # vérifie les versions des outils
 make test     # tests Go (avec détection de data races)
 make build    # compile les binaires dans ./bin
+make run-collector  # lance le collector sur :8080
+make smoke    # requêtes de test sur le collector
 make up       # démarre Redpanda, Redis, MongoDB
 make down     # arrête l'infrastructure
 ```
@@ -49,4 +51,5 @@ Le journal de développement détaillé est dans `journaldedev.md`.
 
 | Palier | Contenu | État |
 |---|---|---|
-| 0 | Squelette, outillage, infrastructure locale | en cours |
+| 0 | Squelette, outillage, infrastructure locale | terminé |
+| 1 | Collector HTTP : réception, validation, arrêt propre | en cours |

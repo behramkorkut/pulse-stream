@@ -22,3 +22,5 @@ __pycache__/
 
 # Données locales des conteneurs (si on monte des volumes en dossier)
 /data/
+
+journal/
