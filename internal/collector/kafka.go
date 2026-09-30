@@ -3,7 +3,6 @@ package collector
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
@@ -103,31 +102,4 @@ func (p *KafkaPublisher) Close() error {
 // (partition "chaude") pendant que les autres restent presque vides.
 func partitionKey(e event.Event) []byte {
 	return []byte(e.SiteID + "/" + e.VisitorID)
-}
-
-// CheckTopic échoue vite (au démarrage) si le broker est injoignable ou si le topic n'existe pas.
-// Mieux vaut un démarrage refusé avec un message clair que des 503 mystérieux en production.
-func CheckTopic(ctx context.Context, brokers []string, topic string) error {
-	if len(brokers) == 0 {
-		return errors.New("no kafka broker configured")
-	}
-
-	conn, err := kafka.DefaultDialer.DialContext(ctx, "tcp", brokers[0])
-	if err != nil {
-		return fmt.Errorf("connect to kafka broker %s: %w", brokers[0], err)
-	}
-	defer conn.Close()
-
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	}
-
-	partitions, err := conn.ReadPartitions(topic)
-	if err != nil {
-		return fmt.Errorf("read partitions of topic %q (does it exist? run: make topics): %w", topic, err)
-	}
-	if len(partitions) == 0 {
-		return fmt.Errorf("topic %q has no partitions (run: make topics)", topic)
-	}
-	return nil
 }

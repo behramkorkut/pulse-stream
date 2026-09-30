@@ -27,6 +27,20 @@ La clé est `site_id/visitor_id`, hachée avec Murmur2 (comme le client Java off
 - Une clé par `site_id` seul créerait des partitions chaudes (un gros site sature une seule partition).
 - Le topic a 6 partitions : jusqu'à 6 consommateurs en parallèle dans un même groupe.
 
+## Garanties du processor
+
+Ordre des opérations pour chaque lot de messages : transformer, écrire toutes les sorties, puis seulement
+valider (commit) les offsets d'entrée. Un crash entre l'écriture et le commit provoque une relecture du lot :
+des doublons possibles, jamais de perte (**au moins une fois**). Le dédoublonnage par `id` se fera en aval.
+
+- Les lots sont transformés en parallèle par des workers, avec un shard par hachage de la clé : un même
+  visiteur est toujours traité séquentiellement, des visiteurs différents en parallèle.
+- Un message invalide ne bloque jamais le flux : il est publié dans `dead-letter` avec la raison,
+  le message d'origine et sa position (topic, partition, offset).
+- Les robots sont conservés dans `enriched-events` avec `is_bot: true` : on ne détruit pas d'information,
+  c'est à l'agrégation de décider quoi compter.
+- Le processor est tolérant aux champs inconnus (contrairement au collector, strict à la frontière).
+
 ## Principes de conception
 
 - **Au moins une fois** côté Kafka, rendu sûr par l'**idempotence** (un identifiant unique par événement).

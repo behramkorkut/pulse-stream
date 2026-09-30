@@ -23,6 +23,9 @@ create() {
 echo "Topics :"
 # 6 partitions = jusqu'à 6 consommateurs en parallèle dans un même groupe (palier processor).
 create raw-events 6
+create enriched-events 6
+# Les rejets sont rares : peu de partitions suffisent.
+create dead-letter 3
 
 echo
 rpk topic describe raw-events --print-partitions 2>/dev/null | head -n 20 || true

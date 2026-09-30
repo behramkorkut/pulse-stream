@@ -42,7 +42,10 @@ make build    # compile les binaires dans ./bin
 make run-collector  # lance le collector sur :8080
 make smoke    # requêtes de test sur le collector
 make topics   # crée les topics Kafka
-make consume  # lit le topic raw-events
+make consume  # lit un topic (TOPIC=enriched-events, TOPIC=dead-letter)
+make run-processor  # lance le processor
+make poison   # publie des messages invalides
+make group    # état du groupe de consommateurs
 make test-integration  # tests avec un vrai broker
 make up       # démarre Redpanda, Redis, MongoDB
 make down     # arrête l'infrastructure
@@ -56,4 +59,5 @@ Le journal de développement détaillé est dans `journaldedev.md`.
 |---|---|---|
 | 0 | Squelette, outillage, infrastructure locale | terminé |
 | 1 | Collector HTTP : réception, validation, arrêt propre | terminé |
-| 2 | Producer Kafka, topics, clé de partitionnement | en cours |
+| 2 | Producer Kafka, topics, clé de partitionnement | terminé |
+| 3 | Processor : consommateur en groupe, enrichissement, dead-letter | en cours |

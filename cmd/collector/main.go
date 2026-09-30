@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/behramkorkut/pulse-stream/internal/collector"
+	"github.com/behramkorkut/pulse-stream/internal/kafkautil"
 	"github.com/behramkorkut/pulse-stream/internal/version"
 )
 
@@ -98,7 +99,7 @@ func newPublisher(ctx context.Context, log *slog.Logger) (collector.Publisher, f
 
 		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		if err := collector.CheckTopic(checkCtx, brokers, topic); err != nil {
+		if err := kafkautil.CheckTopic(checkCtx, brokers, topic); err != nil {
 			return nil, nil, fmt.Errorf("kafka not ready: %w", err)
 		}
 

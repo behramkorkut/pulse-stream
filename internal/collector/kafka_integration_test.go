@@ -17,6 +17,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"github.com/behramkorkut/pulse-stream/internal/event"
+	"github.com/behramkorkut/pulse-stream/internal/kafkautil"
 )
 
 func integrationBrokers() []string {
@@ -53,7 +54,7 @@ func TestKafkaPublisherIntegration(t *testing.T) {
 	// Le topic peut mettre un instant à être visible dans les métadonnées du broker.
 	var checkErr error
 	for i := 0; i < 20; i++ {
-		if checkErr = CheckTopic(ctx, brokers, topic); checkErr == nil {
+		if checkErr = kafkautil.CheckTopic(ctx, brokers, topic); checkErr == nil {
 			break
 		}
 		time.Sleep(250 * time.Millisecond)
