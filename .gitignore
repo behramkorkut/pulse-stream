@@ -1,0 +1,24 @@
+# Binaires Go compilés
+bin/
+*.exe
+*.test
+*.out
+coverage.out
+
+# Python (uv) — utilisé plus tard pour les benchmarks comparatifs
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets et configuration locale
+.env
+.env.local
+
+# macOS / éditeurs
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Données locales des conteneurs (si on monte des volumes en dossier)
+/data/
