@@ -24,3 +24,6 @@ __pycache__/
 /data/
 
 journal/
+
+# Dernier rapport du générateur de charge (les résultats retenus sont copiés à la main dans bench/results/)
+bench/last-run.json

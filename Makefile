@@ -3,9 +3,11 @@
 MODULE  := github.com/behramkorkut/pulse-stream
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 TOPIC   ?= raw-events
+RATES    ?= 200,500,1000
+DURATION ?= 20s
 LDFLAGS := -X $(MODULE)/internal/version.Version=$(VERSION)
 
-.PHONY: help doctor fmt vet test test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic dashboard topics consume group group-aggregator up down ps logs
+.PHONY: help doctor fmt vet test test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic load dashboard topics consume group group-aggregator up down ps logs
 
 help: ## Affiche cette aide
 	grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -64,6 +66,9 @@ metrics: ## Affiche les metriques pulse_* des 3 programmes : make metrics F=batc
 
 traffic: ## Genere du trafic varie pendant N secondes : make traffic N=120
 	bash scripts/traffic.sh $(or $(N),60)
+
+load: build ## Test de charge a debit impose : make load RATES=200,500,1000 DURATION=20s
+	./bin/loadgen -rates $(RATES) -duration $(DURATION)
 
 dashboard: ## Ouvre le dashboard Grafana dans le navigateur (macOS)
 	open http://localhost:3000/d/pulse-stream

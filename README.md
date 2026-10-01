@@ -51,6 +51,7 @@ make demo-sessions  # événements espacés dans le temps, pour voir les session
 make sessions # sessions actives dans Redis
 make demo-dedupe    # le même événement envoyé 3 fois n'est compté qu'une fois
 make traffic       # trafic varié pendant N secondes (N=120)
+make load          # test de charge à débit imposé (RATES=200,500,1000 DURATION=20s)
 make dashboard      # ouvre le dashboard Grafana (http://localhost:3000)
 make metrics       # métriques Prometheus des 3 programmes (F=filtre)
 make aggregates     # compteurs par minute dans MongoDB (SITE=site-42 pour filtrer)
@@ -84,4 +85,5 @@ Le journal de développement détaillé est dans `journaldedev.md`.
 | 3 | Processor : consommateur en groupe, enrichissement, dead-letter | terminé |
 | 4 | Sessions des visiteurs dans Redis (script Lua atomique) | terminé |
 | 5 | Aggregator : dédoublonnage par `id`, compteurs par minute, upserts MongoDB | terminé |
-| 6 | Observabilité : métriques Prometheus, Grafana et dashboard versionné dans Git | en cours |
+| 6 | Observabilité : métriques Prometheus, Grafana et dashboard versionné dans Git | terminé |
+| 7 | Générateur de charge à débit imposé, vérification de bout en bout des compteurs | en cours |

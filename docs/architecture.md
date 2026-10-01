@@ -154,6 +154,27 @@ Aujourd'hui, nos programmes Go tournent sur le Mac, hors de ce réseau : ils joi
 ports publiés (`localhost:19092`, `6379`, `27017`), et Prometheus les joint dans l'autre sens par
 `host.docker.internal`. Une fois les programmes conteneurisés, leurs cibles deviendront `collector:9101`, etc.
 
+## Générateur de charge (`cmd/loadgen`)
+
+Le générateur envoie un trafic réaliste au collector, **à un débit imposé**, par paliers (`200,500,1000` req/s par
+défaut), puis vérifie que le pipeline a compté exactement ce que le collector a accepté.
+
+- **Débit imposé (open-loop).** Les envois sont planifiés sur une grille régulière (`début + i × intervalle`),
+  indépendamment des réponses. Un générateur « boucle fermée » attend la réponse avant d'envoyer la suivante : quand
+  le serveur ralentit, il envoie moins, et la lenteur disparaît des mesures (*coordinated omission*).
+- **Latence depuis l'instant prévu.** Elle inclut l'attente en file : un serveur qui ne suit plus se voit tout de suite
+  dans le p95/p99. Si le client lui-même sature (plus de worker libre, file pleine), la requête est comptée « perdue »
+  côté client, et non masquée.
+- **Trafic mélangé.** Plusieurs sites et visiteurs, pageviews et clics, ~5 % de robots, ~2 % de doublons (même `id`
+  rejoué), ~1 % de messages invalides (400 / 422). Graine fixe (`-seed`) : un même run est reproductible.
+- **Vérification de bout en bout.** Chaque événement *accepté* (202, invalide exclu, un seul par `id`) est compté ;
+  le générateur interroge ensuite MongoDB (sites préfixés `load-<run>-`) jusqu'à stabilisation. Un compteur qui
+  **dépasse** l'attendu est un double comptage (échec immédiat, les compteurs ne font que croître) ; un total qui se
+  stabilise **en dessous** est une perte. Le code de sortie est non nul en cas d'échec.
+- **Limites.** Le client et le collector tournent sur le même Mac : les chiffres valent pour cette machine, pas pour un
+  cluster. L'agrégation `$inc` n'est pas idempotente en cas de crash entre l'écriture et le commit (voir plus haut) :
+  la vérification ne simule pas de panne.
+
 ## Principes de conception
 
 - **Au moins une fois** côté Kafka, rendu sûr par l'**idempotence** (un identifiant unique par événement).
