@@ -51,7 +51,7 @@ make demo-sessions  # événements espacés dans le temps, pour voir les session
 make sessions # sessions actives dans Redis
 make demo-dedupe    # le même événement envoyé 3 fois n'est compté qu'une fois
 make traffic       # trafic varié pendant N secondes (N=120)
-make load          # test de charge à débit imposé (RATES=200,500,1000 DURATION=20s)
+make load          # test de charge à débit imposé (RATES=200,500,1000 DURATION=20s WORKERS=128)
 make dashboard      # ouvre le dashboard Grafana (http://localhost:3000)
 make metrics       # métriques Prometheus des 3 programmes (F=filtre)
 make aggregates     # compteurs par minute dans MongoDB (SITE=site-42 pour filtrer)
@@ -73,6 +73,17 @@ Les programmes écrivent des journaux JSON. Le niveau se règle avec `LOG_LEVEL`
 | 9090 | Prometheus | interface web |
 | 3000 | Grafana | dashboard `pulse-stream` |
 
+## Performances en bref
+
+Mesures sur un MacBook Pro (8 cœurs) où tout tourne sur la même machine, générateur de charge compris
+(détails, protocole et limites : [docs/benchmarks.md](docs/benchmarks.md)).
+
+- Le **collector tient 16 000 requêtes/s** sans erreur (p99 : 20 ms).
+- Le goulot est **derrière** le collector : un processor traite ~6 000 événements/s, le surplus s'accumule dans Kafka
+  (jusqu'à 291 000 messages en retard) puis se résorbe, **sans perte ni double comptage** (vérifié de bout en bout).
+- **1 → 2 → 3 processors** : 5 200 → 8 200 → 9 500 événements/s de bout en bout. Le gain s'essouffle quand
+  l'aggregator, une seule instance, devient le maillon limitant.
+
 ## Avancement
 
 Le journal de développement détaillé est dans `journaldedev.md`.
@@ -86,4 +97,5 @@ Le journal de développement détaillé est dans `journaldedev.md`.
 | 4 | Sessions des visiteurs dans Redis (script Lua atomique) | terminé |
 | 5 | Aggregator : dédoublonnage par `id`, compteurs par minute, upserts MongoDB | terminé |
 | 6 | Observabilité : métriques Prometheus, Grafana et dashboard versionné dans Git | terminé |
-| 7 | Générateur de charge à débit imposé, vérification de bout en bout des compteurs | en cours |
+| 7 | Générateur de charge à débit imposé, vérification de bout en bout des compteurs | terminé |
+| 8 | Benchmarks : limites mesurées, retard fiable, effet du nombre de processors ([détails](docs/benchmarks.md)) | terminé |
