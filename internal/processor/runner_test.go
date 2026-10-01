@@ -274,51 +274,6 @@ func TestRunnerDoesNotCommitWhenWriteKeepsFailing(t *testing.T) {
 	}
 }
 
-func TestCollect(t *testing.T) {
-	fill := func(n int, closed bool) chan kafka.Message {
-		ch := make(chan kafka.Message, n+1)
-		for i := 0; i < n; i++ {
-			ch <- kafka.Message{Offset: int64(i)}
-		}
-		if closed {
-			close(ch)
-		}
-		return ch
-	}
-
-	t.Run("s'arrête à la taille maximale", func(t *testing.T) {
-		batch, more := collect(fill(10, false), 4, time.Second)
-		if len(batch) != 4 || !more {
-			t.Errorf("len=%d more=%v, want 4 true", len(batch), more)
-		}
-	})
-
-	t.Run("s'arrête à l'échéance", func(t *testing.T) {
-		start := time.Now()
-		batch, more := collect(fill(2, false), 10, 20*time.Millisecond)
-		if len(batch) != 2 || !more {
-			t.Errorf("len=%d more=%v, want 2 true", len(batch), more)
-		}
-		if time.Since(start) > 2*time.Second {
-			t.Error("l'échéance n'a pas été respectée")
-		}
-	})
-
-	t.Run("canal fermé après quelques messages", func(t *testing.T) {
-		batch, more := collect(fill(1, true), 10, time.Second)
-		if len(batch) != 1 || more {
-			t.Errorf("len=%d more=%v, want 1 false", len(batch), more)
-		}
-	})
-
-	t.Run("canal fermé et vide", func(t *testing.T) {
-		batch, more := collect(fill(0, true), 10, time.Second)
-		if len(batch) != 0 || more {
-			t.Errorf("len=%d more=%v, want 0 false", len(batch), more)
-		}
-	})
-}
-
 func TestShardOf(t *testing.T) {
 	const shards = 8
 	seen := map[int]bool{}

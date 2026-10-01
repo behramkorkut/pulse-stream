@@ -14,6 +14,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/behramkorkut/pulse-stream/internal/batch"
 	"github.com/behramkorkut/pulse-stream/internal/kafkautil"
 	"github.com/behramkorkut/pulse-stream/internal/processor"
 	"github.com/behramkorkut/pulse-stream/internal/sessions"
@@ -72,7 +73,7 @@ func run() error {
 	}
 	defer closeStore()
 
-	reader := processor.NewReader(brokers, groupID, rawTopic)
+	reader := batch.NewReader(brokers, groupID, rawTopic)
 	writer := processor.NewWriter(brokers)
 	// Fermer le reader fait quitter le groupe immédiatement : les autres instances récupèrent
 	// ses partitions tout de suite, sans attendre l'expiration de sa session.
@@ -129,7 +130,7 @@ func newSessionStore(ctx context.Context, log *slog.Logger, timeout time.Duratio
 			return nil, nil, fmt.Errorf("redis not ready at %s: %w", addr, err)
 		}
 
-		log.Info("sessions enabled", slog.String("redis", addr), slog.Duration("timeout", timeout))
+		log.Info("sessions enabled", slog.String("redis", addr), slog.String("timeout", timeout.String()))
 		return sessions.NewRedis(client, timeout), func() { _ = client.Close() }, nil
 
 	default:

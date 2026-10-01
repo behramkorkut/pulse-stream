@@ -31,7 +31,7 @@ La clé est `site_id/visitor_id`, hachée avec Murmur2 (comme le client Java off
 
 Ordre des opérations pour chaque lot de messages : transformer, écrire toutes les sorties, puis seulement
 valider (commit) les offsets d'entrée. Un crash entre l'écriture et le commit provoque une relecture du lot :
-des doublons possibles, jamais de perte (**au moins une fois**). Le dédoublonnage par `id` se fera en aval.
+des doublons possibles, jamais de perte (**au moins une fois**). Le dédoublonnage par `id` est fait en aval, par l'aggregator.
 
 - Les lots sont transformés en parallèle par des workers, avec un shard par hachage de la clé : un même
   visiteur est toujours traité séquentiellement, des visiteurs différents en parallèle.
@@ -58,6 +58,43 @@ avoir écrit ni validé : mieux vaut un retard qu'un événement publié sans se
 
 Le magasin `Memory` sert de référence exécutable de la règle : les mêmes tests de contrat s'appliquent à
 `Memory` et à `Redis`.
+
+## Aggregator : dédoublonner, compter, écrire
+
+L'aggregator lit `enriched-events` (groupe `pulse-aggregator`) et maintient, dans MongoDB, un document par
+site et par minute (`_id = site|2026-09-30T11:00Z`) avec les compteurs `pageviews`, `clicks`, `bot_events`,
+`sessions` et les répartitions `devices.*` / `browsers.*`. Chaque lot suit cet ordre précis :
+
+1. décoder (un message inexploitable est écarté et journalisé, jamais bloquant) et écarter les doublons du lot ;
+2. demander à Redis quels identifiants ont déjà été comptés (`MGET`) et les écarter ;
+3. cumuler les compteurs dans MongoDB (un seul `BulkWrite` d'upserts avec `$inc`) ;
+4. **seulement alors**, mémoriser les identifiants comptés dans Redis (`SET ... EX`, TTL d'une heure) ;
+5. puis valider les offsets Kafka.
+
+Pourquoi cet ordre : un crash entre 3 et 4 fait recompter le lot (au pire des doublons), un crash entre 4 et 5
+ne recompte rien (les identifiants sont déjà mémorisés). Mémoriser avant d'écrire ferait l'inverse : si
+l'écriture échoue, la relecture verrait les identifiants comme « déjà comptés » et les événements seraient
+perdus. Entre deux maux, on choisit le doublon rare plutôt que la perte silencieuse.
+
+Le temps utilisé est celui de l'**événement** : un événement en retard tombe dans la bonne minute. Les robots
+n'alimentent que `bot_events`. Les clés des répartitions sont filtrées sur une liste blanche (sinon `other`) :
+le contenu du topic ne doit jamais devenir un nom de champ MongoDB.
+
+Limites assumées, à documenter honnêtement :
+
+- `$inc` n'est pas idempotent : si `Apply` échoue *après* avoir appliqué une partie du lot puis est retenté,
+  ces compteurs peuvent être comptés deux fois. L'éviter demanderait des transactions (Mongo en jeu de
+  répliques) ou un état idempotent par construction (par exemple stocker les identifiants d'événements par bucket).
+- Fenêtre Apply -> Mark : un crash pile entre les deux fait recompter un lot une fois.
+- La mémoire Redis du dédoublonnage croît avec le débit x le TTL. À grande échelle : fenêtre plus courte,
+  filtre de Bloom, ou état local par partition.
+
+## Boucle de consommation commune (`internal/batch`)
+
+Le processor et l'aggregator partagent la même boucle : une goroutine lit Kafka, un canal tamponné alimente
+l'assemblage des lots (taille ou délai), un `Handler` fournit le métier, et la boucle valide les offsets
+uniquement après un succès. La garantie « au moins une fois » et l'arrêt propre sont donc écrits et testés une
+seule fois.
 
 ## Principes de conception
 

@@ -5,7 +5,7 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 TOPIC   ?= raw-events
 LDFLAGS := -X $(MODULE)/internal/version.Version=$(VERSION)
 
-.PHONY: help doctor fmt vet test test-integration build clean run-collector run-processor smoke poison sessions demo-sessions topics consume group up down ps logs
+.PHONY: help doctor fmt vet test test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe topics consume group group-aggregator up down ps logs
 
 help: ## Affiche cette aide
 	grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -38,6 +38,9 @@ run-collector: build ## Lance le collector en local (Ctrl+C pour l'arreter)
 run-processor: build ## Lance le processor en local (Ctrl+C pour l'arreter)
 	./bin/processor
 
+run-aggregator: build ## Lance l'aggregator en local (Ctrl+C pour l'arreter)
+	./bin/aggregator
+
 smoke: ## Test de fumee du collector (il doit deja tourner)
 	bash scripts/smoke-collector.sh
 
@@ -50,6 +53,12 @@ sessions: ## Affiche quelques sessions actives dans Redis
 demo-sessions: ## Envoie des evenements espaces dans le temps pour voir les sessions
 	bash scripts/sessions-demo.sh
 
+aggregates: ## Compteurs par minute dans MongoDB : make aggregates SITE=site-42
+	bash scripts/aggregates.sh $(SITE)
+
+demo-dedupe: ## Envoie 3 fois le meme evenement : il ne doit etre compte qu'une fois
+	bash scripts/dedupe-demo.sh
+
 topics: ## Cree les topics Kafka (infrastructure demarree)
 	bash scripts/create-topics.sh
 
@@ -58,6 +67,9 @@ consume: ## Lit un topic : make consume TOPIC=enriched-events (Ctrl+C pour quitt
 
 group: ## Membres, partitions assignees et retard du groupe pulse-processor
 	docker compose exec redpanda rpk group describe pulse-processor
+
+group-aggregator: ## Membres, partitions assignees et retard du groupe pulse-aggregator
+	docker compose exec redpanda rpk group describe pulse-aggregator
 
 up: ## Demarre l'infrastructure locale (Redpanda, Redis, MongoDB)
 	docker compose up -d --wait

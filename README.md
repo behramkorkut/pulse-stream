@@ -44,10 +44,13 @@ make smoke    # requêtes de test sur le collector
 make topics   # crée les topics Kafka
 make consume  # lit un topic (TOPIC=enriched-events, TOPIC=dead-letter)
 make run-processor  # lance le processor
+make run-aggregator # lance l'aggregator (compteurs par minute dans MongoDB)
 make poison   # publie des messages invalides
 make group    # état du groupe de consommateurs
 make demo-sessions  # événements espacés dans le temps, pour voir les sessions
 make sessions # sessions actives dans Redis
+make demo-dedupe    # le même événement envoyé 3 fois n'est compté qu'une fois
+make aggregates     # compteurs par minute dans MongoDB (SITE=site-42 pour filtrer)
 make test-integration  # tests avec un vrai broker
 make up       # démarre Redpanda, Redis, MongoDB
 make down     # arrête l'infrastructure
@@ -63,4 +66,5 @@ Le journal de développement détaillé est dans `journaldedev.md`.
 | 1 | Collector HTTP : réception, validation, arrêt propre | terminé |
 | 2 | Producer Kafka, topics, clé de partitionnement | terminé |
 | 3 | Processor : consommateur en groupe, enrichissement, dead-letter | terminé |
-| 4 | Sessions des visiteurs dans Redis (script Lua atomique) | en cours |
+| 4 | Sessions des visiteurs dans Redis (script Lua atomique) | terminé |
+| 5 | Aggregator : dédoublonnage par `id`, compteurs par minute, upserts MongoDB | en cours |

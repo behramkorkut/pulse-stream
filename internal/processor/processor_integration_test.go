@@ -19,6 +19,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 
+	"github.com/behramkorkut/pulse-stream/internal/batch"
 	"github.com/behramkorkut/pulse-stream/internal/event"
 	"github.com/behramkorkut/pulse-stream/internal/kafkautil"
 	"github.com/behramkorkut/pulse-stream/internal/sessions"
@@ -97,7 +98,7 @@ func TestProcessorIntegration(t *testing.T) {
 		t.Fatalf("publication des messages bruts : %v", err)
 	}
 
-	reader := NewReader(brokers, "it-group-"+suffix, rawTopic)
+	reader := batch.NewReader(brokers, "it-group-"+suffix, rawTopic)
 	writer := NewWriter(brokers)
 	t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
 
