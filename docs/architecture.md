@@ -111,7 +111,7 @@ Le trafic de supervision est ainsi séparé du trafic métier. Les métriques ut
 | `pulse_batches_total{consumer,result}` | compteur | lots traités (ok / error) |
 | `pulse_batch_messages_total{consumer}` | compteur | messages dont le lot est traité et validé |
 | `pulse_batch_size{consumer}` / `pulse_batch_duration_seconds{consumer}` | histogrammes | taille et durée des lots |
-| `pulse_consumer_lag{consumer}` | jauge | messages publiés mais pas encore lus |
+| `pulse_consumer_lag{consumer}` | jauge | messages publiés mais pas encore validés par le groupe, **somme de toutes les partitions** |
 | `pulse_processor_events_total{outcome}` | compteur | écrits : `enriched` ou `dead_letter` |
 | `pulse_processor_dead_letters_total{reason}` | compteur | rejets par raison |
 | `pulse_aggregator_events_total{outcome}` | compteur | `counted`, `duplicate`, `skipped` |
@@ -127,6 +127,13 @@ Règles suivies : un compteur n'avance qu'une fois l'action réellement réussie
 échoue) ; les labels n'ont que quelques valeurs possibles (jamais d'identifiant ni d'URL : chaque valeur
 distincte crée une série en mémoire, c'est l'« explosion de cardinalité »). Les débits se déduisent des
 compteurs (`rate(...)` dans Prometheus), on n'expose pas de débit déjà calculé.
+
+**Mesure du retard.** Le retard d'un groupe est `fin de partition − offset validé`, additionné sur toutes les
+partitions (`internal/kafkautil/lag.go`, via l'API d'administration de Kafka, toutes les 5 s en arrière-plan).
+Une première version lisait `Reader.Stats().Lag` de `kafka-go` : en test de charge, elle affichait environ 90 000
+alors que `rpk group describe` annonçait plus de 290 000, soit un rapport proche du nombre de partitions (6) : cette
+valeur ne reflète qu'une partition à la fois. Leçon : valider une métrique contre une source indépendante avant de
+s'y fier.
 
 ## Grafana et dashboard
 

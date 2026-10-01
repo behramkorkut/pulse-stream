@@ -107,7 +107,11 @@ func run() error {
 	}()
 
 	reg := metrics.NewRegistry()
-	batch.RegisterLag(reg, "aggregator", func() int64 { return reader.Stats().Lag })
+	// Retard du groupe entier (somme des partitions), mesuré en arrière-plan : Reader.Stats().Lag ne voit
+	// qu'une partition à la fois, et sous-estime donc le retard réel d'un facteur proche du nombre de partitions.
+	lag := &kafkautil.LagTracker{}
+	go lag.Run(ctx, kafkautil.NewGroupSource(brokers, topic, groupID), 5*time.Second, log)
+	batch.RegisterLag(reg, "aggregator", lag.Value)
 	stopMetrics, err := metrics.Start(getenv("METRICS_ADDR", ":9103"), reg, log)
 	if err != nil {
 		return err
