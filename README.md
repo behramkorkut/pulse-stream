@@ -38,6 +38,7 @@ Vérification de l'environnement : `make doctor`
 make help     # liste des commandes
 make doctor   # vérifie les versions des outils
 make test     # tests Go (avec détection de data races)
+make ci       # les mêmes vérifications que la CI : format, vet, tests + couverture, build
 make build    # compile les binaires dans ./bin
 make run-collector  # lance le collector sur :8080
 make smoke    # requêtes de test sur le collector
@@ -84,6 +85,20 @@ Mesures sur un MacBook Pro (8 cœurs) où tout tourne sur la même machine, gén
 - **1 → 2 → 3 processors** : 5 200 → 8 200 → 9 500 événements/s de bout en bout. Le gain s'essouffle quand
   l'aggregator, une seule instance, devient le maillon limitant.
 
+## Intégration continue
+
+À chaque push sur `main` et à chaque pull request, GitHub Actions (`.github/workflows/ci.yml`) exécute trois jobs
+en parallèle :
+
+| Job | Contenu |
+|---|---|
+| Qualité et tests unitaires | `go mod tidy` sans différence, `gofmt`, `go vet` (avec et sans les tests d'intégration), tests avec détecteur de data races et couverture, compilation |
+| Tests d'intégration | démarre Redpanda, Redis et MongoDB avec le `docker-compose.yml` du projet, puis `make test-integration` |
+| Vulnérabilités connues | `govulncheck` sur le code et ses dépendances |
+
+Tout ce que fait le premier job se rejoue en local avec `make ci`. Dependabot propose chaque semaine la mise à jour
+des dépendances Go et des actions GitHub.
+
 ## Avancement
 
 Le journal de développement détaillé est dans `journaldedev.md`.
@@ -99,3 +114,4 @@ Le journal de développement détaillé est dans `journaldedev.md`.
 | 6 | Observabilité : métriques Prometheus, Grafana et dashboard versionné dans Git | terminé |
 | 7 | Générateur de charge à débit imposé, vérification de bout en bout des compteurs | terminé |
 | 8 | Benchmarks : limites mesurées, retard fiable, effet du nombre de processors ([détails](docs/benchmarks.md)) | terminé |
+| 9 | Intégration continue GitHub Actions : qualité, tests, tests d'intégration, vulnérabilités | en cours |

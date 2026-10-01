@@ -1,0 +1,105 @@
+# Intégration continue : à chaque push sur main et à chaque pull request, GitHub rejoue les mêmes
+# vérifications que `make ci` en local, plus les tests d'intégration contre une vraie infrastructure.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Un nouveau push sur la même branche annule l'exécution précédente encore en cours : inutile de finir de
+# tester un commit déjà dépassé.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Droits minimaux : la CI ne fait que lire le dépôt.
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Qualité et tests unitaires
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # La version de Go vient de go.mod : une seule source de vérité, aucune dérive entre le Mac et la CI.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go.mod et go.sum sont à jour
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Formatage (gofmt)
+        run: make fmt-check
+
+      - name: Analyse statique (go vet)
+        run: make vet
+
+      - name: Tests avec détecteur de data races
+        run: make cover
+
+      - name: Résumé de la couverture
+        run: |
+          {
+            echo '### Couverture des tests'
+            echo
+            echo '```'
+            go tool cover -func=coverage.out | tail -1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compilation des binaires
+        run: make build
+
+  integration:
+    name: Tests d'intégration (Redpanda, Redis, MongoDB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # On réutilise le docker-compose.yml du projet : la CI teste contre la même infrastructure qu'en local.
+      # --wait attend que les healthchecks passent ; seuls les trois services nécessaires sont démarrés.
+      - name: Démarrer l'infrastructure
+        run: docker compose up -d --wait redpanda redis mongo
+
+      - name: Tests d'intégration
+        run: make test-integration
+
+      - name: Journaux de l'infrastructure (en cas d'échec)
+        if: failure()
+        run: docker compose logs --no-color --tail=200
+
+      - name: Arrêter l'infrastructure
+        if: always()
+        run: docker compose down -v
+
+  vulncheck:
+    name: Vulnérabilités connues (govulncheck)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Compilé avec la version de Go du projet : toujours compatible, contrairement à un binaire téléchargé.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

@@ -8,7 +8,7 @@ DURATION ?= 20s
 WORKERS  ?= 128
 LDFLAGS := -X $(MODULE)/internal/version.Version=$(VERSION)
 
-.PHONY: help doctor fmt vet test test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic load dashboard topics consume group group-aggregator up down ps logs
+.PHONY: help doctor fmt fmt-check vet test cover ci test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic load dashboard topics consume group group-aggregator up down ps logs
 
 help: ## Affiche cette aide
 	grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -19,11 +19,21 @@ doctor: ## Verifie les outils installes et leurs versions
 fmt: ## Formate le code Go
 	go fmt ./...
 
-vet: ## Analyse statique du code Go
+fmt-check: ## Verifie le formatage sans rien modifier (utilise par la CI)
+	@out="$$(gofmt -l .)"; if [ -n "$$out" ]; then echo "Fichiers mal formates :"; echo "$$out"; echo "Corrige avec : make fmt"; exit 1; fi
+
+vet: ## Analyse statique du code Go (avec et sans les tests d'integration)
 	go vet ./...
+	go vet -tags=integration ./...
 
 test: ## Lance les tests avec le detecteur de data races
 	go test -race -count=1 ./...
+
+cover: ## Tests avec detecteur de data races et mesure de couverture (coverage.out)
+	go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+	@go tool cover -func=coverage.out | tail -1
+
+ci: fmt-check vet cover build ## Les memes verifications que la CI (hors tests d'integration)
 
 test-integration: ## Tests d'integration (necessite make up)
 	go test -race -count=1 -tags=integration ./internal/...
