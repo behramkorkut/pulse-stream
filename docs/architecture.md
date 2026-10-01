@@ -123,6 +123,20 @@ Règles suivies : un compteur n'avance qu'une fois l'action réellement réussie
 distincte crée une série en mémoire, c'est l'« explosion de cardinalité »). Les débits se déduisent des
 compteurs (`rate(...)` dans Prometheus), on n'expose pas de débit déjà calculé.
 
+## Grafana et dashboard
+
+Grafana (`http://localhost:3000`, accès libre : usage local uniquement) interroge Prometheus par le réseau
+`pulse-net` (`http://prometheus:9090`). Tout est déclaré par fichiers, rien n'est configuré à la main :
+
+- `deploy/grafana/provisioning/datasources/` : la source de données Prometheus ;
+- `deploy/grafana/provisioning/dashboards/` : où trouver les dashboards ;
+- `deploy/grafana/dashboards/pulse-stream.json` : le dashboard (24 panneaux : synthèse, collector, consommateurs,
+  processor, aggregator/MongoDB, runtime Go).
+
+Le dashboard est en lecture seule dans l'interface (`allowUiUpdates: false`) : on le modifie dans le JSON, donc
+dans Git, et il se recharge seul en 10 s. Un dashboard cliqué à la main n'existe que dans le volume de Grafana :
+perdu au premier `make down -v`, impossible à relire en revue de code. `make traffic` l'alimente.
+
 ## Réseau Docker
 
 Le `docker-compose.yml` déclare un réseau explicite `pulse-net` auquel tous les services sont rattachés. Sur un

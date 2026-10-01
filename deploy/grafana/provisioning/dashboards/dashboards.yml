@@ -1,0 +1,11 @@
+# Indique à Grafana où trouver les dashboards (fichiers JSON) à charger au démarrage.
+apiVersion: 1
+
+providers:
+  - name: pulse-stream
+    type: file
+    disableDeletion: true     # un dashboard provisionné ne se supprime pas depuis l'interface
+    allowUiUpdates: false     # pour modifier : éditer le JSON dans Git (sinon la modif est perdue au redémarrage)
+    updateIntervalSeconds: 10 # relit les fichiers toutes les 10 s : on voit une modif sans redémarrer
+    options:
+      path: /var/lib/grafana/dashboards

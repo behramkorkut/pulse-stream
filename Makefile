@@ -5,7 +5,7 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 TOPIC   ?= raw-events
 LDFLAGS := -X $(MODULE)/internal/version.Version=$(VERSION)
 
-.PHONY: help doctor fmt vet test test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics topics consume group group-aggregator up down ps logs
+.PHONY: help doctor fmt vet test test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic dashboard topics consume group group-aggregator up down ps logs
 
 help: ## Affiche cette aide
 	grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -61,6 +61,12 @@ demo-dedupe: ## Envoie 3 fois le meme evenement : il ne doit etre compte qu'une 
 
 metrics: ## Affiche les metriques pulse_* des 3 programmes : make metrics F=batch
 	bash scripts/metrics.sh $(F)
+
+traffic: ## Genere du trafic varie pendant N secondes : make traffic N=120
+	bash scripts/traffic.sh $(or $(N),60)
+
+dashboard: ## Ouvre le dashboard Grafana dans le navigateur (macOS)
+	open http://localhost:3000/d/pulse-stream
 
 topics: ## Cree les topics Kafka (infrastructure demarree)
 	bash scripts/create-topics.sh

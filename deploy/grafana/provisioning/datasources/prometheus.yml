@@ -1,0 +1,12 @@
+# Source de données Grafana, déclarée par fichier ("provisioning") : au démarrage, Grafana la crée tout seul.
+# Rien à cliquer, et la configuration vit dans Git comme le reste du projet.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus          # identifiant stable : le dashboard y fait référence
+    type: prometheus
+    access: proxy            # c'est Grafana (côté serveur) qui interroge Prometheus, pas le navigateur
+    url: http://prometheus:9090   # nom du service sur le réseau pulse-net
+    isDefault: true
+    editable: false

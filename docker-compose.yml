@@ -1,5 +1,5 @@
 # Infrastructure locale de pulse-stream.
-# Prometheus (palier 6) lit les métriques des programmes Go ; Grafana (palier 6b) les affichera.
+# Prometheus (palier 6) lit les métriques des programmes Go ; Grafana (palier 6b) les affiche.
 name: pulse-stream
 
 # Réseau explicite. Sans cette section, Compose en crée un lui-même ("pulse-stream_default") et y branche
@@ -86,7 +86,34 @@ services:
       timeout: 3s
       retries: 10
 
+  grafana:
+    image: grafana/grafana:11.4.0
+    networks: [pulse]
+    ports:
+      - "3000:3000"
+    environment:
+      # Usage LOCAL uniquement : accès sans identifiant, en administrateur. Ne jamais exposer tel quel.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: light
+    volumes:
+      # Tout est déclaré par fichiers (versionnés dans Git) : source de données, fournisseur de dashboards, dashboards.
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
 volumes:
   redpanda-data:
   mongo-data:
   prometheus-data:
+  grafana-data:
