@@ -16,6 +16,7 @@ import (
 
 	"github.com/behramkorkut/pulse-stream/internal/batch"
 	"github.com/behramkorkut/pulse-stream/internal/kafkautil"
+	"github.com/behramkorkut/pulse-stream/internal/metrics"
 	"github.com/behramkorkut/pulse-stream/internal/processor"
 	"github.com/behramkorkut/pulse-stream/internal/sessions"
 	"github.com/behramkorkut/pulse-stream/internal/version"
@@ -86,7 +87,17 @@ func run() error {
 		}
 	}()
 
+	reg := metrics.NewRegistry()
+	batch.RegisterLag(reg, "processor", func() int64 { return reader.Stats().Lag })
+	stopMetrics, err := metrics.Start(getenv("METRICS_ADDR", ":9102"), reg, log)
+	if err != nil {
+		return err
+	}
+	defer stopMetrics()
+
 	runner := processor.NewRunner(reader, writer, processor.Config{
+		Metrics:         processor.NewMetrics(reg),
+		BatchMetrics:    batch.NewMetrics(reg, "processor"),
 		EnrichedTopic:   enrichedTopic,
 		DeadLetterTopic: deadTopic,
 		Sessions:        store,

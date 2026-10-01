@@ -17,22 +17,23 @@ import (
 const maxBodyBytes = 64 << 10
 
 type api struct {
-	pub Publisher
-	log *slog.Logger
-	now func() time.Time // injectable pour les tests
+	pub     Publisher
+	log     *slog.Logger
+	now     func() time.Time // injectable pour les tests
+	metrics *Metrics         // nil : aucune mesure
 }
 
-// NewHandler construit le routeur HTTP du collector.
-func NewHandler(pub Publisher, log *slog.Logger) http.Handler {
-	return newHandler(pub, log, time.Now)
+// NewHandler construit le routeur HTTP du collector. m peut être nil (aucune mesure).
+func NewHandler(pub Publisher, log *slog.Logger, m *Metrics) http.Handler {
+	return newHandler(pub, log, time.Now, m)
 }
 
-func newHandler(pub Publisher, log *slog.Logger, now func() time.Time) http.Handler {
-	a := &api{pub: pub, log: log, now: now}
+func newHandler(pub Publisher, log *slog.Logger, now func() time.Time, m *Metrics) http.Handler {
+	a := &api{pub: pub, log: log, now: now, metrics: m}
 
 	mux := http.NewServeMux()
 	// Depuis Go 1.22, le motif peut contenir la méthode HTTP : toute autre méthode reçoit un 405.
-	mux.HandleFunc("POST /collect", a.collect)
+	mux.HandleFunc("POST /collect", m.instrument(a.collect))
 	mux.HandleFunc("GET /healthz", a.healthz)
 	return mux
 }
@@ -69,7 +70,10 @@ func (a *api) collect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.pub.Publish(r.Context(), e); err != nil {
+	publishStart := time.Now()
+	err := a.pub.Publish(r.Context(), e)
+	a.metrics.observePublish(time.Since(publishStart))
+	if err != nil {
 		a.log.ErrorContext(r.Context(), "publish failed", slog.String("id", e.ID), slog.Any("error", err))
 		writeError(w, http.StatusServiceUnavailable, "temporarily unavailable, retry later")
 		return

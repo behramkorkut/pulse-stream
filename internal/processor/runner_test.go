@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/segmentio/kafka-go"
 
 	"github.com/behramkorkut/pulse-stream/internal/event"
@@ -436,5 +438,57 @@ func TestRunnerWritesAndCommitsNothingWhenSessionStoreIsDown(t *testing.T) {
 	}
 	if n := len(src.committed()); n != 0 {
 		t.Errorf("%d offsets validés : les messages seraient perdus", n)
+	}
+}
+
+func TestRunnerCountsWhatItWritesByOutcomeAndReason(t *testing.T) {
+	msgs := []kafka.Message{
+		kmsg(0, "site-42/v-1", rawEvent("evt-0", chromeUA)),
+		kmsg(1, "site-42/v-2", rawEvent("evt-1", "Googlebot/2.1")),
+		kmsg(2, "site-42/v-3", []byte(`{oops`)),
+		kmsg(3, "site-42/v-4", []byte(`{"id":"incomplet"}`)),
+		kmsg(4, "site-42/v-5", []byte(`{oops`)),
+	}
+	m := NewMetrics(prometheus.NewRegistry())
+	cfg := testConfig()
+	cfg.Metrics = m
+	r, src, _ := newTestRunner(msgs, cfg)
+	stop := startRunner(t, r)
+
+	waitFor(t, "les 5 offsets validés", func() bool { return len(src.committed()) == 5 })
+	if err := stop(); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	checks := []struct {
+		name string
+		got  float64
+		want float64
+	}{
+		{"enrichis (humain + robot)", testutil.ToFloat64(m.events.WithLabelValues("enriched")), 2},
+		{"dead-letter", testutil.ToFloat64(m.events.WithLabelValues("dead_letter")), 3},
+		{"raison invalid_json", testutil.ToFloat64(m.deadLetters.WithLabelValues(ReasonInvalidJSON)), 2},
+		{"raison invalid_event", testutil.ToFloat64(m.deadLetters.WithLabelValues(ReasonInvalidEvent)), 1},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
+
+// Si l'écriture échoue, rien n'est publié : les compteurs ne doivent pas bouger.
+func TestRunnerDoesNotCountWhenTheWriteFails(t *testing.T) {
+	m := NewMetrics(prometheus.NewRegistry())
+	cfg := testConfig()
+	cfg.Metrics = m
+	r, _, dst := newTestRunner([]kafka.Message{kmsg(0, "k", rawEvent("evt-0", chromeUA))}, cfg)
+	dst.failAlways = true
+
+	if err := r.Run(context.Background()); err == nil {
+		t.Fatal("Run() a réussi alors que l'écriture échoue")
+	}
+	if got := testutil.ToFloat64(m.events.WithLabelValues("enriched")); got != 0 {
+		t.Errorf("enrichis = %v, want 0 : rien n'a été publié", got)
 	}
 }

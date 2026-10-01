@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/behramkorkut/pulse-stream/internal/event"
 )
 
@@ -43,7 +46,7 @@ func (f *fakePublisher) count() int {
 
 func newTestHandler(pub Publisher) http.Handler {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return newHandler(pub, log, func() time.Time { return fixedNow })
+	return newHandler(pub, log, func() time.Time { return fixedNow }, nil)
 }
 
 const validBody = `{
@@ -138,5 +141,37 @@ func TestHealthz(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"ok"`) {
 		t.Errorf("body = %s, want status ok", rec.Body)
+	}
+}
+
+func TestMetricsCountRequestsByStatusCode(t *testing.T) {
+	m := NewMetrics(prometheus.NewRegistry())
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pub := &fakePublisher{}
+	h := newHandler(pub, log, func() time.Time { return fixedNow }, m)
+
+	do(h, http.MethodPost, "/collect", validBody)                  // 202
+	do(h, http.MethodPost, "/collect", validBody)                  // 202
+	do(h, http.MethodPost, "/collect", `{oops`)                    // 400
+	do(h, http.MethodPost, "/collect", `{"id":"x","type":"nope"}`) // champs inconnus ou invalides
+	do(h, http.MethodGet, "/healthz", "")                          // hors /collect : non compté
+
+	pub.err = errors.New("kafka down")
+	do(h, http.MethodPost, "/collect", validBody) // 503
+
+	for code, want := range map[string]float64{"202": 2, "400": 1, "503": 1} {
+		if got := testutil.ToFloat64(m.requests.WithLabelValues(code)); got != want {
+			t.Errorf("requêtes avec le code %s = %v, want %v", code, got, want)
+		}
+	}
+	if got := testutil.CollectAndCount(m.duration); got != 1 {
+		t.Errorf("l'histogramme des durées n'est pas alimenté (séries = %d)", got)
+	}
+}
+
+func TestNilMetricsLeaveTheHandlerUntouched(t *testing.T) {
+	h := newTestHandler(&fakePublisher{}) // métriques nil
+	if rec := do(h, http.MethodPost, "/collect", validBody); rec.Code != http.StatusAccepted {
+		t.Errorf("code = %d, want 202 : l'absence de métriques ne doit rien changer", rec.Code)
 	}
 }

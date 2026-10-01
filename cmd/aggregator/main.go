@@ -22,6 +22,7 @@ import (
 	"github.com/behramkorkut/pulse-stream/internal/batch"
 	"github.com/behramkorkut/pulse-stream/internal/dedupe"
 	"github.com/behramkorkut/pulse-stream/internal/kafkautil"
+	"github.com/behramkorkut/pulse-stream/internal/metrics"
 	"github.com/behramkorkut/pulse-stream/internal/version"
 )
 
@@ -101,11 +102,21 @@ func run() error {
 		}
 	}()
 
+	reg := metrics.NewRegistry()
+	batch.RegisterLag(reg, "aggregator", func() int64 { return reader.Stats().Lag })
+	stopMetrics, err := metrics.Start(getenv("METRICS_ADDR", ":9103"), reg, log)
+	if err != nil {
+		return err
+	}
+	defer stopMetrics()
+
 	runner := aggregator.NewRunner(reader, store,
 		dedupe.NewRedis(rdb, time.Duration(dedupeTTLMin)*time.Minute),
 		aggregator.Config{
-			BatchSize: batchSize,
-			BatchWait: time.Duration(batchWaitMs) * time.Millisecond,
+			BatchSize:    batchSize,
+			BatchWait:    time.Duration(batchWaitMs) * time.Millisecond,
+			Metrics:      aggregator.NewMetrics(reg),
+			BatchMetrics: batch.NewMetrics(reg, "aggregator"),
 		}, log)
 
 	log.Info("aggregator started",

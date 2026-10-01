@@ -15,6 +15,7 @@ import (
 
 	"github.com/behramkorkut/pulse-stream/internal/collector"
 	"github.com/behramkorkut/pulse-stream/internal/kafkautil"
+	"github.com/behramkorkut/pulse-stream/internal/metrics"
 	"github.com/behramkorkut/pulse-stream/internal/version"
 )
 
@@ -48,9 +49,17 @@ func run() error {
 		}
 	}()
 
+	// Métriques sur un port dédié : le trafic de collecte et celui de supervision ne se mélangent pas.
+	reg := metrics.NewRegistry()
+	stopMetrics, err := metrics.Start(getenv("METRICS_ADDR", ":9101"), reg, log)
+	if err != nil {
+		return err
+	}
+	defer stopMetrics()
+
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: collector.NewHandler(pub, log),
+		Handler: collector.NewHandler(pub, log, collector.NewMetrics(reg)),
 		// Sans ces délais, un client lent ou malveillant peut garder une connexion ouverte indéfiniment.
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,

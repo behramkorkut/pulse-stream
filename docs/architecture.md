@@ -96,6 +96,45 @@ l'assemblage des lots (taille ou délai), un `Handler` fournit le métier, et la
 uniquement après un succès. La garantie « au moins une fois » et l'arrêt propre sont donc écrits et testés une
 seule fois.
 
+## Observabilité
+
+Chaque programme expose ses métriques en texte sur `GET /metrics`, sur un port dédié (collector `:9101`,
+processor `:9102`, aggregator `:9103`, réglables avec `METRICS_ADDR`). Prometheus vient les lire toutes les 5 s.
+Le trafic de supervision est ainsi séparé du trafic métier. Les métriques utilisent un registre explicite
+(pas le registre global) : un test crée son registre et lit exactement ce qu'il a produit.
+
+| Métrique | Type | Sens |
+|---|---|---|
+| `pulse_collector_requests_total{code}` | compteur | requêtes `/collect` par code HTTP (202, 400, 422, 503...) |
+| `pulse_collector_request_duration_seconds` | histogramme | durée d'une requête |
+| `pulse_collector_publish_duration_seconds` | histogramme | part passée à publier dans Kafka |
+| `pulse_batches_total{consumer,result}` | compteur | lots traités (ok / error) |
+| `pulse_batch_messages_total{consumer}` | compteur | messages dont le lot est traité et validé |
+| `pulse_batch_size{consumer}` / `pulse_batch_duration_seconds{consumer}` | histogrammes | taille et durée des lots |
+| `pulse_consumer_lag{consumer}` | jauge | messages publiés mais pas encore lus |
+| `pulse_processor_events_total{outcome}` | compteur | écrits : `enriched` ou `dead_letter` |
+| `pulse_processor_dead_letters_total{reason}` | compteur | rejets par raison |
+| `pulse_aggregator_events_total{outcome}` | compteur | `counted`, `duplicate`, `skipped` |
+| `pulse_aggregator_buckets_written_total` | compteur | documents (site, minute) mis à jour |
+| `pulse_aggregator_store_duration_seconds` | histogramme | durée d'un appel MongoDB |
+
+Règles suivies : un compteur n'avance qu'une fois l'action réellement réussie (rien n'est compté si l'écriture
+échoue) ; les labels n'ont que quelques valeurs possibles (jamais d'identifiant ni d'URL : chaque valeur
+distincte crée une série en mémoire, c'est l'« explosion de cardinalité »). Les débits se déduisent des
+compteurs (`rate(...)` dans Prometheus), on n'expose pas de débit déjà calculé.
+
+## Réseau Docker
+
+Le `docker-compose.yml` déclare un réseau explicite `pulse-net` auquel tous les services sont rattachés. Sur un
+même réseau, les conteneurs se trouvent par le nom du service (`redpanda:9092`, `redis:6379`, `mongo:27017`) :
+Docker fournit un DNS interne. Sans déclaration, Compose crée un réseau par défaut équivalent ; le déclarer
+rend l'architecture lisible et prépare la suite (conteneurs des programmes Go, puis Kubernetes, où la notion
+de réseau et de nom de service est centrale).
+
+Aujourd'hui, nos programmes Go tournent sur le Mac, hors de ce réseau : ils joignent l'infrastructure par les
+ports publiés (`localhost:19092`, `6379`, `27017`), et Prometheus les joint dans l'autre sens par
+`host.docker.internal`. Une fois les programmes conteneurisés, leurs cibles deviendront `collector:9101`, etc.
+
 ## Principes de conception
 
 - **Au moins une fois** côté Kafka, rendu sûr par l'**idempotence** (un identifiant unique par événement).

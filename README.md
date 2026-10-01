@@ -50,6 +50,7 @@ make group    # état du groupe de consommateurs
 make demo-sessions  # événements espacés dans le temps, pour voir les sessions
 make sessions # sessions actives dans Redis
 make demo-dedupe    # le même événement envoyé 3 fois n'est compté qu'une fois
+make metrics       # métriques Prometheus des 3 programmes (F=filtre)
 make aggregates     # compteurs par minute dans MongoDB (SITE=site-42 pour filtrer)
 make test-integration  # tests avec un vrai broker
 make up       # démarre Redpanda, Redis, MongoDB
@@ -67,4 +68,5 @@ Le journal de développement détaillé est dans `journaldedev.md`.
 | 2 | Producer Kafka, topics, clé de partitionnement | terminé |
 | 3 | Processor : consommateur en groupe, enrichissement, dead-letter | terminé |
 | 4 | Sessions des visiteurs dans Redis (script Lua atomique) | terminé |
-| 5 | Aggregator : dédoublonnage par `id`, compteurs par minute, upserts MongoDB | en cours |
+| 5 | Aggregator : dédoublonnage par `id`, compteurs par minute, upserts MongoDB | terminé |
+| 6 | Observabilité : métriques Prometheus (collector, processor, aggregator), Prometheus ; Grafana ensuite | en cours |

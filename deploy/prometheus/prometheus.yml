@@ -1,0 +1,20 @@
+# Configuration locale de Prometheus : il vient lire (scrape) /metrics de chaque programme toutes les 5 s.
+#
+# Les programmes Go tournent sur le Mac, pas dans Docker : Prometheus (dans un conteneur) les joint par
+# l'adresse spéciale host.docker.internal, qui désigne la machine hôte.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: collector
+    static_configs:
+      - targets: ["host.docker.internal:9101"]
+
+  - job_name: processor
+    static_configs:
+      - targets: ["host.docker.internal:9102"]
+
+  - job_name: aggregator
+    static_configs:
+      - targets: ["host.docker.internal:9103"]

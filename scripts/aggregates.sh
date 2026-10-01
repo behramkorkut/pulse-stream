@@ -15,5 +15,8 @@ fi
 docker compose exec -T mongo mongosh --quiet pulse --eval "
   const docs = db.minute_stats.find($filter).sort({minute: -1}).limit(10).toArray();
   if (docs.length === 0) { print('Aucun compteur dans MongoDB (l aggregator tourne-t-il ?)'); }
-  docs.forEach(d => print(JSON.stringify(d)));
+  // Les compteurs sont des entiers 64 bits (Long) : JSON.stringify les afficherait {high, low, unsigned}.
+  // Le remplaçant les convertit en nombres ordinaires pour l'affichage.
+  const plain = (k, v) => (v !== null && typeof v === 'object' && typeof v.toNumber === 'function') ? v.toNumber() : v;
+  docs.forEach(d => print(JSON.stringify(d, plain)));
 "

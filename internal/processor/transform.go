@@ -43,6 +43,8 @@ type Result struct {
 type Output struct {
 	Value []byte
 	Dead  bool // true : à publier dans dead-letter ; false : dans enriched-events
+
+	Reason string // raison du rejet (renseignée seulement si Dead)
 }
 
 // Transform décode, valide et enrichit un message brut. C'est une fonction pure : aucune entrée-sortie,
@@ -89,7 +91,7 @@ func (r Result) encode(raw []byte, src Source, now time.Time) Output {
 		// Ne peut pas arriver avec ces types simples, mais un rejet ne doit jamais disparaître.
 		value = []byte(`{"reason":"dead_letter_encode_error"}`)
 	}
-	return Output{Value: value, Dead: true}
+	return Output{Value: value, Dead: true, Reason: r.Dead.Reason}
 }
 
 func newDeadLetter(reason string, problems []string, raw []byte, src Source, now time.Time) *DeadLetter {

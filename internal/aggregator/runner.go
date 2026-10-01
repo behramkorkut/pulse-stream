@@ -19,6 +19,9 @@ type Config struct {
 	BatchWait    time.Duration // défaut : 50 ms
 	MaxAttempts  int           // essais avant d'abandonner (défaut : 5)
 	RetryBackoff time.Duration // pause avant le 2e essai, doublée à chaque essai (défaut : 200 ms)
+
+	Metrics      *Metrics       // optionnel : mesures de l'aggregator
+	BatchMetrics *batch.Metrics // optionnel : mesures de la boucle de consommation
 }
 
 // Runner lit les événements enrichis par lots, écarte les doublons et cumule les compteurs.
@@ -38,7 +41,7 @@ func NewRunner(src batch.Source, store Store, seen dedupe.Store, cfg Config, log
 // Run traite les messages jusqu'à l'annulation de ctx (arrêt propre, retourne nil)
 // ou jusqu'à une erreur irrécupérable (retourne l'erreur).
 func (r *Runner) Run(ctx context.Context) error {
-	return batch.Run(ctx, r.src, batch.Config{Size: r.cfg.BatchSize, Wait: r.cfg.BatchWait}, r.handle)
+	return batch.Run(ctx, r.src, batch.Config{Size: r.cfg.BatchSize, Wait: r.cfg.BatchWait, Metrics: r.cfg.BatchMetrics}, r.handle)
 }
 
 // handle traite un lot dans cet ordre précis :
@@ -85,13 +88,20 @@ func (r *Runner) handle(ctx context.Context, msgs []kafka.Message) error {
 
 	buckets := Aggregate(fresh)
 	if len(buckets) > 0 {
-		if err := retry.Do(ctx, r.log, "apply counters", func() error { return r.store.Apply(ctx, buckets) }); err != nil {
+		applyOnce := func() error {
+			start := time.Now()
+			defer func() { r.cfg.Metrics.observeApply(time.Since(start)) }()
+			return r.store.Apply(ctx, buckets)
+		}
+		if err := retry.Do(ctx, r.log, "apply counters", applyOnce); err != nil {
 			return fmt.Errorf("apply counters: %w", err)
 		}
 		if err := retry.Do(ctx, r.log, "mark counted ids", func() error { return r.seen.Mark(ctx, freshIDs) }); err != nil {
 			return fmt.Errorf("mark counted ids: %w", err)
 		}
 	}
+
+	r.cfg.Metrics.observeBatch(len(fresh), duplicates, skipped, len(buckets))
 
 	r.log.Info("batch aggregated",
 		slog.Int("messages", len(msgs)),

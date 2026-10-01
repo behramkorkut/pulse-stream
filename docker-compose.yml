@@ -1,6 +1,14 @@
 # Infrastructure locale de pulse-stream.
-# Prometheus et Grafana seront ajoutés au palier "observabilité".
+# Prometheus (palier 6) lit les métriques des programmes Go ; Grafana (palier 6b) les affichera.
 name: pulse-stream
+
+# Réseau explicite. Sans cette section, Compose en crée un lui-même ("pulse-stream_default") et y branche
+# tous les services : ça marche, mais c'est implicite. Le déclarer rend l'architecture lisible, et c'est ce
+# réseau que rejoindront les conteneurs de nos programmes Go (collector, processor, aggregator) plus tard.
+# Sur un même réseau, les conteneurs se joignent par le NOM du service : redpanda:9092, redis:6379, mongo:27017.
+networks:
+  pulse:
+    name: pulse-net
 
 services:
   redpanda:
@@ -20,6 +28,7 @@ services:
       # "internal" : pour les conteneurs du compose. "external" : pour nos programmes Go lancés sur le Mac.
       - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
       - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    networks: [pulse]
     ports:
       - "19092:19092" # Kafka (depuis le Mac)
       - "9644:9644"   # API d'administration Redpanda
@@ -34,6 +43,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    networks: [pulse]
     ports:
       - "6379:6379"
     healthcheck:
@@ -44,6 +54,7 @@ services:
 
   mongo:
     image: mongo:7
+    networks: [pulse]
     ports:
       - "27017:27017"
     volumes:
@@ -55,6 +66,27 @@ services:
       retries: 20
       start_period: 10s
 
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2d
+    networks: [pulse]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    # Les programmes Go tournent sur le Mac : "host.docker.internal" désigne cette machine hôte.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9090/-/healthy || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   redpanda-data:
   mongo-data:
+  prometheus-data:

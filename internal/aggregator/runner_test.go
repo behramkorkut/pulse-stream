@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/segmentio/kafka-go"
 
 	"github.com/behramkorkut/pulse-stream/internal/dedupe"
@@ -318,5 +320,32 @@ func TestRunnerDoesNotCountWhenTheSeenCheckFails(t *testing.T) {
 	}
 	if n := r.src.committed(); n != 0 {
 		t.Errorf("%d offsets validés", n)
+	}
+}
+
+func TestRunnerCountsEventsByOutcome(t *testing.T) {
+	same := human("e1", "site-42", event.TypePageview, "desktop", "chrome", 0, true)
+	cfg := testConfig()
+	m := NewMetrics(prometheus.NewRegistry())
+	cfg.Metrics = m
+	r := newRig([]kafka.Message{
+		msgFor(t, 0, same), msgFor(t, 1, same), // un doublon dans le lot
+		{Topic: "enriched-events", Offset: 2, Value: []byte(`{oops`)}, // inexploitable
+		msgFor(t, 3, human("e2", "site-42", event.TypeClick, "desktop", "chrome", time.Second, false)),
+	}, cfg)
+	stop := r.start(t)
+
+	waitFor(t, "les 4 offsets validés", func() bool { return r.src.committed() == 4 })
+	if err := stop(); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	for outcome, want := range map[string]float64{"counted": 2, "duplicate": 1, "skipped": 1} {
+		if got := testutil.ToFloat64(m.events.WithLabelValues(outcome)); got != want {
+			t.Errorf("issue %q = %v, want %v", outcome, got, want)
+		}
+	}
+	if got := testutil.ToFloat64(m.buckets); got != 1 {
+		t.Errorf("documents écrits = %v, want 1 (une seule minute, un seul site)", got)
 	}
 }

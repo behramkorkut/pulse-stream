@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -204,4 +206,57 @@ func TestRetryPolicy(t *testing.T) {
 			t.Errorf("err=%v calls=%d, want context.Canceled après 1 essai", err, calls)
 		}
 	})
+}
+
+func TestRunRecordsMetricsForSuccessfulBatches(t *testing.T) {
+	m := NewMetrics(prometheus.NewRegistry(), "test")
+	src := &fakeSource{pending: messages(5)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, src, Config{Size: 10, Wait: 20 * time.Millisecond, Metrics: m},
+			func(context.Context, []kafka.Message) error { return nil })
+	}()
+
+	waitFor(t, "5 offsets validés", func() bool { return src.committed() == 5 })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if got := testutil.ToFloat64(m.messages); got != 5 {
+		t.Errorf("pulse_batch_messages_total = %v, want 5", got)
+	}
+	if got := testutil.ToFloat64(m.batches.WithLabelValues("ok")); got < 1 {
+		t.Errorf("lots ok = %v, want au moins 1", got)
+	}
+	if got := testutil.ToFloat64(m.batches.WithLabelValues("error")); got != 0 {
+		t.Errorf("lots en erreur = %v, want 0", got)
+	}
+}
+
+// Un lot qui échoue ne doit PAS être compté comme des messages traités : sinon le débit affiché
+// dépasserait ce qui est réellement validé.
+func TestRunRecordsMetricsForFailedBatches(t *testing.T) {
+	m := NewMetrics(prometheus.NewRegistry(), "test")
+	src := &fakeSource{pending: messages(3)}
+
+	err := Run(context.Background(), src, Config{Wait: 10 * time.Millisecond, Metrics: m},
+		func(context.Context, []kafka.Message) error { return errors.New("boom") })
+	if err == nil {
+		t.Fatal("Run() a réussi alors que le traitement échoue")
+	}
+
+	if got := testutil.ToFloat64(m.batches.WithLabelValues("error")); got != 1 {
+		t.Errorf("lots en erreur = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.messages); got != 0 {
+		t.Errorf("pulse_batch_messages_total = %v, want 0 (le lot n'a pas été traité)", got)
+	}
+}
+
+func TestNilMetricsAreHarmless(t *testing.T) {
+	var m *Metrics
+	m.observe(10, time.Second, nil) // ne doit pas paniquer
 }

@@ -33,6 +33,9 @@ type Config struct {
 	BatchWait    time.Duration // attente maximale pour remplir un lot (défaut : 50 ms)
 	MaxAttempts  int           // essais (transformation, écriture) avant d'abandonner (défaut : 5)
 	RetryBackoff time.Duration // pause avant le 2e essai, doublée à chaque essai (défaut : 200 ms)
+
+	Metrics      *Metrics       // optionnel : mesures du processor
+	BatchMetrics *batch.Metrics // optionnel : mesures de la boucle de consommation
 }
 
 func (c Config) withDefaults() Config {
@@ -76,7 +79,7 @@ func newRunner(src batch.Source, dst sink, cfg Config, log *slog.Logger, now fun
 // ou jusqu'à une erreur irrécupérable (retourne l'erreur). La boucle de lecture, l'assemblage des
 // lots et la validation des offsets sont dans le paquet batch ; ici, seulement le métier.
 func (r *Runner) Run(ctx context.Context) error {
-	return batch.Run(ctx, r.src, batch.Config{Size: r.cfg.BatchSize, Wait: r.cfg.BatchWait}, r.handle)
+	return batch.Run(ctx, r.src, batch.Config{Size: r.cfg.BatchSize, Wait: r.cfg.BatchWait, Metrics: r.cfg.BatchMetrics}, r.handle)
 }
 
 // handle traite un lot. Il ne retourne nil que si TOUS les résultats sont écrits dans Kafka : la
@@ -112,6 +115,8 @@ func (r *Runner) handle(ctx context.Context, msgs []kafka.Message) error {
 	if err != nil {
 		return fmt.Errorf("write batch: %w", err)
 	}
+
+	r.cfg.Metrics.observe(outs)
 
 	r.log.Info("batch processed",
 		slog.Int("messages", len(msgs)),

@@ -5,7 +5,7 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 TOPIC   ?= raw-events
 LDFLAGS := -X $(MODULE)/internal/version.Version=$(VERSION)
 
-.PHONY: help doctor fmt vet test test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe topics consume group group-aggregator up down ps logs
+.PHONY: help doctor fmt vet test test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics topics consume group group-aggregator up down ps logs
 
 help: ## Affiche cette aide
 	grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -58,6 +58,9 @@ aggregates: ## Compteurs par minute dans MongoDB : make aggregates SITE=site-42
 
 demo-dedupe: ## Envoie 3 fois le meme evenement : il ne doit etre compte qu'une fois
 	bash scripts/dedupe-demo.sh
+
+metrics: ## Affiche les metriques pulse_* des 3 programmes : make metrics F=batch
+	bash scripts/metrics.sh $(F)
 
 topics: ## Cree les topics Kafka (infrastructure demarree)
 	bash scripts/create-topics.sh

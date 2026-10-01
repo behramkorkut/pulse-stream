@@ -29,6 +29,8 @@ type Config struct {
 	Size     int           // taille maximale d'un lot (défaut : 200)
 	Wait     time.Duration // attente maximale pour remplir un lot (défaut : 50 ms)
 	Deadline time.Duration // temps accordé au traitement d'un lot et à son commit (défaut : 15 s)
+
+	Metrics *Metrics // optionnel : nil = aucune mesure
 }
 
 func (c Config) withDefaults() Config {
@@ -106,6 +108,13 @@ func process(ctx context.Context, src Source, cfg Config, handle Handler, lot []
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.Deadline)
 	defer cancel()
 
+	start := time.Now()
+	err := handleAndCommit(ctx, src, handle, lot)
+	cfg.Metrics.observe(len(lot), time.Since(start), err)
+	return err
+}
+
+func handleAndCommit(ctx context.Context, src Source, handle Handler, lot []kafka.Message) error {
 	if err := handle(ctx, lot); err != nil {
 		return err
 	}
