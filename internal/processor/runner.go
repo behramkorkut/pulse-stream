@@ -118,7 +118,7 @@ func (r *Runner) handle(ctx context.Context, msgs []kafka.Message) error {
 
 	r.cfg.Metrics.observe(outs)
 
-	r.log.Info("batch processed",
+	r.log.Debug("batch processed",
 		slog.Int("messages", len(msgs)),
 		slog.Int("dead_letter", dead),
 		slog.Float64("took_ms", float64(time.Since(start).Microseconds())/1000),

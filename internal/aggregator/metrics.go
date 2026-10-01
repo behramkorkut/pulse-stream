@@ -17,7 +17,7 @@ type Metrics struct {
 // NewMetrics déclare les métriques de l'aggregator dans reg (nil : déclarées mais non publiées).
 func NewMetrics(reg prometheus.Registerer) *Metrics {
 	f := promauto.With(reg)
-	return &Metrics{
+	m := &Metrics{
 		events: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "pulse_aggregator_events_total",
 			Help: "Messages lus par l'aggregator, par issue : comptés, doublons écartés, inexploitables.",
@@ -32,6 +32,12 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Buckets: prometheus.ExponentialBuckets(0.001, 2, 14), // 1 ms ... 8 s
 		}),
 	}
+
+	// Séries créées à zéro dès le départ (voir batch.NewMetrics : "No data" et première incrémentation perdue).
+	for _, outcome := range []string{"counted", "duplicate", "skipped"} {
+		m.events.WithLabelValues(outcome)
+	}
+	return m
 }
 
 // observeBatch est appelée une fois le lot compté ET mémorisé : on ne compte que ce qui est acquis.

@@ -24,7 +24,7 @@ func NewMetrics(reg prometheus.Registerer, consumer string) *Metrics {
 	f := promauto.With(reg)
 	labels := prometheus.Labels{"consumer": consumer}
 
-	return &Metrics{
+	m := &Metrics{
 		batches: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "pulse_batches_total", Help: "Lots traités, par résultat.", ConstLabels: labels,
 		}, []string{"result"}),
@@ -41,6 +41,13 @@ func NewMetrics(reg prometheus.Registerer, consumer string) *Metrics {
 			Buckets:     prometheus.ExponentialBuckets(0.001, 2, 14), // 1 ms ... 8 s
 		}),
 	}
+
+	// Les séries étiquetées n'existent qu'une fois touchées. On les crée à zéro dès le départ : sans cela,
+	// un dashboard affiche "No data" au lieu de 0, et surtout rate() ignore la toute première incrémentation
+	// (il lui faut deux points pour calculer une variation, or le premier point serait déjà 1).
+	m.batches.WithLabelValues("ok")
+	m.batches.WithLabelValues("error")
+	return m
 }
 
 // RegisterLag publie le retard du consommateur : le nombre de messages publiés mais pas encore lus.

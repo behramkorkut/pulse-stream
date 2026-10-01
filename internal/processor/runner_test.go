@@ -492,3 +492,13 @@ func TestRunnerDoesNotCountWhenTheWriteFails(t *testing.T) {
 		t.Errorf("enrichis = %v, want 0 : rien n'a été publié", got)
 	}
 }
+
+func TestMetricsSeriesExistAtZeroFromTheStart(t *testing.T) {
+	m := NewMetrics(prometheus.NewRegistry())
+	if got := testutil.CollectAndCount(m.events); got != 2 {
+		t.Errorf("séries pulse_processor_events_total = %d, want 2 (enriched et dead_letter)", got)
+	}
+	if got := testutil.CollectAndCount(m.deadLetters); got != 3 {
+		t.Errorf("séries pulse_processor_dead_letters_total = %d, want 3 (une par raison connue)", got)
+	}
+}

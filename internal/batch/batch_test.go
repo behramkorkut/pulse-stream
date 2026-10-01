@@ -260,3 +260,15 @@ func TestNilMetricsAreHarmless(t *testing.T) {
 	var m *Metrics
 	m.observe(10, time.Second, nil) // ne doit pas paniquer
 }
+
+// Les séries doivent exister à zéro dès la création : sinon "No data" dans Grafana, et rate() perd la
+// première incrémentation d'une série qui apparaît directement à 1.
+func TestMetricsSeriesExistAtZeroFromTheStart(t *testing.T) {
+	m := NewMetrics(prometheus.NewRegistry(), "test")
+	if got := testutil.CollectAndCount(m.batches); got != 2 {
+		t.Errorf("séries pulse_batches_total = %d, want 2 (ok et error)", got)
+	}
+	if got := testutil.ToFloat64(m.batches.WithLabelValues("error")); got != 0 {
+		t.Errorf("lots en erreur = %v, want 0", got)
+	}
+}

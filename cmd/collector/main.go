@@ -15,6 +15,7 @@ import (
 
 	"github.com/behramkorkut/pulse-stream/internal/collector"
 	"github.com/behramkorkut/pulse-stream/internal/kafkautil"
+	"github.com/behramkorkut/pulse-stream/internal/logging"
 	"github.com/behramkorkut/pulse-stream/internal/metrics"
 	"github.com/behramkorkut/pulse-stream/internal/version"
 )
@@ -29,7 +30,10 @@ func main() {
 // run contient toute la logique et retourne une erreur : main() est le seul endroit qui appelle
 // os.Exit, ce qui garantit que les `defer` ont bien le temps de s'exécuter.
 func run() error {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	log, err := logging.New(os.Stdout, os.Getenv("LOG_LEVEL"))
+	if err != nil {
+		return err
+	}
 	addr := getenv("COLLECTOR_ADDR", ":8080")
 
 	// ctx est annulé quand le processus reçoit Ctrl+C (SIGINT) ou SIGTERM (envoyé par Docker/Kubernetes).

@@ -22,6 +22,7 @@ import (
 	"github.com/behramkorkut/pulse-stream/internal/batch"
 	"github.com/behramkorkut/pulse-stream/internal/dedupe"
 	"github.com/behramkorkut/pulse-stream/internal/kafkautil"
+	"github.com/behramkorkut/pulse-stream/internal/logging"
 	"github.com/behramkorkut/pulse-stream/internal/metrics"
 	"github.com/behramkorkut/pulse-stream/internal/version"
 )
@@ -34,7 +35,10 @@ func main() {
 }
 
 func run() error {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	log, err := logging.New(os.Stdout, os.Getenv("LOG_LEVEL"))
+	if err != nil {
+		return err
+	}
 
 	brokers := splitCSV(getenv("KAFKA_BROKERS", "localhost:19092"))
 	topic := getenv("KAFKA_TOPIC_ENRICHED", "enriched-events")

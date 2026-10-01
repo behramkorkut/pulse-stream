@@ -21,7 +21,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	f := promauto.With(reg)
 	buckets := prometheus.ExponentialBuckets(0.001, 2, 14) // 1 ms ... 8 s
 
-	return &Metrics{
+	m := &Metrics{
 		requests: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "pulse_collector_requests_total",
 			Help: "Requêtes reçues sur /collect, par code HTTP.",
@@ -35,6 +35,15 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Buckets: buckets,
 		}),
 	}
+
+	// Les codes que /collect peut renvoyer : séries créées à zéro dès le départ (voir batch.NewMetrics).
+	for _, code := range []int{
+		http.StatusAccepted, http.StatusBadRequest, http.StatusRequestEntityTooLarge,
+		http.StatusUnprocessableEntity, http.StatusServiceUnavailable,
+	} {
+		m.requests.WithLabelValues(strconv.Itoa(code))
+	}
+	return m
 }
 
 func (m *Metrics) observePublish(took time.Duration) {

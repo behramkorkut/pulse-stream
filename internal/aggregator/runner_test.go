@@ -349,3 +349,10 @@ func TestRunnerCountsEventsByOutcome(t *testing.T) {
 		t.Errorf("documents écrits = %v, want 1 (une seule minute, un seul site)", got)
 	}
 }
+
+func TestMetricsSeriesExistAtZeroFromTheStart(t *testing.T) {
+	m := NewMetrics(prometheus.NewRegistry())
+	if got := testutil.CollectAndCount(m.events); got != 3 {
+		t.Errorf("séries pulse_aggregator_events_total = %d, want 3 (counted, duplicate, skipped)", got)
+	}
+}

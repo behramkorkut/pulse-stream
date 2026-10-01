@@ -14,7 +14,7 @@ type Metrics struct {
 // NewMetrics déclare les métriques du processor dans reg (nil : déclarées mais non publiées).
 func NewMetrics(reg prometheus.Registerer) *Metrics {
 	f := promauto.With(reg)
-	return &Metrics{
+	m := &Metrics{
 		events: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "pulse_processor_events_total",
 			Help: "Messages écrits par le processor, par destination.",
@@ -24,6 +24,14 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Help: "Messages rejetés vers dead-letter, par raison.",
 		}, []string{"reason"}),
 	}
+
+	// Séries créées à zéro dès le départ (voir batch.NewMetrics : "No data" et première incrémentation perdue).
+	m.events.WithLabelValues("enriched")
+	m.events.WithLabelValues("dead_letter")
+	for _, reason := range []string{ReasonInvalidJSON, ReasonInvalidEvent, ReasonEncodeError} {
+		m.deadLetters.WithLabelValues(reason)
+	}
+	return m
 }
 
 // observe est appelée une fois le lot écrit dans Kafka : on ne compte que ce qui est réellement publié.

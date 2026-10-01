@@ -103,7 +103,7 @@ func (r *Runner) handle(ctx context.Context, msgs []kafka.Message) error {
 
 	r.cfg.Metrics.observeBatch(len(fresh), duplicates, skipped, len(buckets))
 
-	r.log.Info("batch aggregated",
+	r.log.Debug("batch aggregated",
 		slog.Int("messages", len(msgs)),
 		slog.Int("counted", len(fresh)),
 		slog.Int("duplicates", duplicates),

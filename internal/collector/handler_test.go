@@ -175,3 +175,10 @@ func TestNilMetricsLeaveTheHandlerUntouched(t *testing.T) {
 		t.Errorf("code = %d, want 202 : l'absence de métriques ne doit rien changer", rec.Code)
 	}
 }
+
+func TestMetricsSeriesExistAtZeroFromTheStart(t *testing.T) {
+	m := NewMetrics(prometheus.NewRegistry())
+	if got := testutil.CollectAndCount(m.requests); got != 5 {
+		t.Errorf("séries pulse_collector_requests_total = %d, want 5 (un code par réponse possible)", got)
+	}
+}

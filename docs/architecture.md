@@ -118,6 +118,11 @@ Le trafic de supervision est ainsi séparé du trafic métier. Les métriques ut
 | `pulse_aggregator_buckets_written_total` | compteur | documents (site, minute) mis à jour |
 | `pulse_aggregator_store_duration_seconds` | histogramme | durée d'un appel MongoDB |
 
+Les séries étiquetées (par code, par issue, par raison) sont créées à zéro au démarrage. Une série qui n'existe
+pas affiche « No data » au lieu de 0 ; pire, `rate()` a besoin de deux points pour mesurer une variation : une
+série qui apparaît directement à 1 voit sa toute première incrémentation ignorée (gênant pour des événements rares
+comme les rejets). Des tests vérifient que ces séries existent dès la création des métriques.
+
 Règles suivies : un compteur n'avance qu'une fois l'action réellement réussie (rien n'est compté si l'écriture
 échoue) ; les labels n'ont que quelques valeurs possibles (jamais d'identifiant ni d'URL : chaque valeur
 distincte crée une série en mémoire, c'est l'« explosion de cardinalité »). Les débits se déduisent des
