@@ -1,6 +1,6 @@
 //go:build integration
 
-// Test d'intégration : nécessite Redis (make up). Il utilise la base numéro 15 et la vide :
+// Test d'intégration : nécessite Redis (make up). Il utilise la base numéro 14, réservée à ce paquet, et la vide :
 // ne jamais pointer ce test vers un Redis contenant des données à conserver.
 
 package sessions
@@ -19,7 +19,7 @@ func TestRedisStoreContract(t *testing.T) {
 		addr = "localhost:6379"
 	}
 
-	client := redis.NewClient(&redis.Options{Addr: addr, DB: 15})
+	client := redis.NewClient(&redis.Options{Addr: addr, DB: 14})
 	t.Cleanup(func() { _ = client.Close() })
 
 	if err := client.Ping(context.Background()).Err(); err != nil {

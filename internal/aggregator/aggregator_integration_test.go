@@ -73,12 +73,12 @@ func TestAggregatorIntegration(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = producer.Close() })
 
-	// Redis : base numéro 15, réservée aux tests (elle est vidée).
+	// Redis : base numéro 12, réservée à CE paquet de tests (elle est vidée ; chaque paquet a la sienne : les paquets de test s'exécutent en parallèle).
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
 		redisAddr = "localhost:6379"
 	}
-	rdb := redis.NewClient(&redis.Options{Addr: redisAddr, DB: 15})
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr, DB: 12})
 	t.Cleanup(func() { _ = rdb.Close() })
 	if err := rdb.FlushDB(ctx).Err(); err != nil {
 		t.Fatalf("Redis injoignable sur %s (make up ?) : %v", redisAddr, err)

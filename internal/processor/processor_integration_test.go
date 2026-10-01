@@ -102,12 +102,12 @@ func TestProcessorIntegration(t *testing.T) {
 	writer := NewWriter(brokers)
 	t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
 
-	// Redis : base numéro 15, réservée aux tests (elle est vidée).
+	// Redis : base numéro 13, réservée à CE paquet de tests (elle est vidée ; chaque paquet a la sienne : les paquets de test s'exécutent en parallèle).
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
 		redisAddr = "localhost:6379"
 	}
-	rdb := redis.NewClient(&redis.Options{Addr: redisAddr, DB: 15})
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr, DB: 13})
 	t.Cleanup(func() { _ = rdb.Close() })
 	if err := rdb.FlushDB(ctx).Err(); err != nil {
 		t.Fatalf("Redis injoignable sur %s (make up ?) : %v", redisAddr, err)

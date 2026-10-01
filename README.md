@@ -1,5 +1,7 @@
 # pulse-stream
 
+[![CI](https://github.com/behramkorkut/pulse-stream/actions/workflows/ci.yml/badge.svg)](https://github.com/behramkorkut/pulse-stream/actions/workflows/ci.yml)
+
 Chaîne de collecte d'événements d'analytics web **en temps réel**, écrite en Go.
 Projet portfolio pour monter en compétence sur les pipelines temps réel
 (Kafka, Redis, MongoDB, observabilité, Kubernetes).
@@ -96,6 +98,10 @@ en parallèle :
 | Tests d'intégration | démarre Redpanda, Redis et MongoDB avec le `docker-compose.yml` du projet, puis `make test-integration` |
 | Vulnérabilités connues | `govulncheck` sur le code et ses dépendances |
 
+Les tests d'intégration partagent une seule infrastructure : chaque paquet de test a donc **sa propre base Redis**
+(aggregator 12, processor 13, sessions 14, dedupe 15), car `go test` exécute les paquets en parallèle et ces tests
+vident leur base au départ. Les topics Kafka et les bases MongoDB de test portent un nom unique par exécution.
+
 Tout ce que fait le premier job se rejoue en local avec `make ci`. Dependabot propose chaque semaine la mise à jour
 des dépendances Go et des actions GitHub.
 
@@ -114,4 +120,4 @@ Le journal de développement détaillé est dans `journaldedev.md`.
 | 6 | Observabilité : métriques Prometheus, Grafana et dashboard versionné dans Git | terminé |
 | 7 | Générateur de charge à débit imposé, vérification de bout en bout des compteurs | terminé |
 | 8 | Benchmarks : limites mesurées, retard fiable, effet du nombre de processors ([détails](docs/benchmarks.md)) | terminé |
-| 9 | Intégration continue GitHub Actions : qualité, tests, tests d'intégration, vulnérabilités | en cours |
+| 9 | Intégration continue GitHub Actions : qualité, tests, tests d'intégration, vulnérabilités | terminé |

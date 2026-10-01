@@ -1,6 +1,6 @@
 //go:build integration
 
-// Test d'intégration : nécessite Redis (make up). Il utilise la base numéro 15 et la vide :
+// Test d'intégration : nécessite Redis (make up). Il utilise la base numéro 15, réservée à ce paquet, et la vide :
 // ne jamais pointer ce test vers un Redis contenant des données à conserver.
 
 package dedupe
