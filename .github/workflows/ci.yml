@@ -149,3 +149,83 @@ jobs:
       - name: Journaux du conteneur (en cas d'échec)
         if: failure() && matrix.program == 'collector'
         run: docker logs collector
+
+  helm:
+    name: Chart Helm (lint et rendu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # helm est déjà installé sur les machines GitHub. --strict transforme les avertissements en erreurs.
+      - name: helm lint
+        run: helm lint --strict deploy/helm/pulse-stream --set-file monitoring.dashboards.pulse-stream=deploy/grafana/dashboards/pulse-stream.json
+
+      # Le chart contient des branches conditionnelles (infra, supervision, service, nombre de répliques) :
+      # une valeur par défaut qui marche ne prouve pas que les autres combinaisons produisent du YAML valide.
+      - name: Rendu avec les valeurs par défaut
+        run: make helm-template > /dev/null
+
+      - name: Rendu sans infrastructure, sans supervision, sans topics
+        run: make helm-template HELM_ARGS="--set infra.enabled=false --set monitoring.enabled=false --set topics.create=false" > /dev/null
+
+      - name: Rendu avec 3 processors et sans Service pour le collector
+        run: make helm-template HELM_ARGS="--set apps.processor.replicas=3 --set apps.collector.service.enabled=false" > /dev/null
+
+  kubernetes:
+    name: Déploiement sur Kubernetes (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Le même cluster que sur le Mac (même fichier de configuration, même nom) : kind y publie les ports 18080,
+      # 19090 et 13000 de la machine, que les cibles `make k8s-*` utilisent.
+      - name: Créer le cluster kind
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: pulse
+          config: deploy/kind/kind-config.yaml
+
+      - name: Construire et charger les images dans le cluster
+        run: |
+          make docker-build IMAGES="collector processor aggregator"
+          make kind-load
+
+      # Deux processors : on teste aussi la répartition des partitions entre répliques d'un même groupe.
+      - name: Installer le chart (attend que tout soit prêt)
+        run: make helm-install HELM_ARGS="--set apps.processor.replicas=2"
+
+      - name: Test de fumée du collector
+        run: |
+          code="$(curl -sS -o /dev/null -w '%{http_code}' http://localhost:18080/healthz)"
+          echo "GET /healthz -> ${code}"
+          test "${code}" = "200"
+
+      # Prometheus doit avoir découvert tout seul : 1 collector + 2 processors + 1 aggregator.
+      - name: Prometheus découvre les 4 pods
+        run: |
+          for i in $(seq 1 30); do
+            up="$(curl -fsS http://localhost:19090/api/v1/targets | jq '[.data.activeTargets[] | select(.health == "up")] | length')"
+            echo "cibles up : ${up}"
+            test "${up}" = "4" && exit 0
+            sleep 2
+          done
+          exit 1
+
+      # Le test qui compte : de la charge, puis comparaison exacte avec ce que MongoDB a compté.
+      # loadgen échoue (code 1) s'il manque ou s'il y a un événement en trop.
+      - name: Charge et vérification exacte des compteurs
+        run: make k8s-load-verify RATES=500 DURATION=15s WORKERS=64
+
+      - name: État du cluster (en cas d'échec)
+        if: failure()
+        run: |
+          kubectl get pods --namespace pulse -o wide
+          kubectl describe pods --namespace pulse
+          kubectl logs --namespace pulse --selector app.kubernetes.io/part-of=pulse-stream --all-containers --prefix --tail=100

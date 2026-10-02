@@ -44,6 +44,18 @@ qui crée les topics.
 - **Redémarrage automatique sur changement de configuration** : les Deployments de Prometheus et Grafana portent une
   annotation `checksum/config` (empreinte du ConfigMap) ; modifier la configuration change le pod, donc le redémarre.
 
+## Vérifié à chaque push
+
+Deux jobs de la CI (`.github/workflows/ci.yml`) couvrent le chart :
+
+- **`helm`** : `helm lint --strict`, puis le rendu de trois combinaisons de valeurs (par défaut ; sans infrastructure,
+  supervision ni topics ; 3 processors sans Service). Le chart a des branches conditionnelles : que les valeurs par
+  défaut produisent du YAML valide ne prouve rien sur les autres.
+- **`kubernetes`** : crée un cluster kind avec le même fichier de configuration qu'en local, construit et charge les
+  images, installe le chart avec 2 processors (`--wait`), puis vérifie que le collector répond, que Prometheus a
+  découvert exactement 4 pods (collector, 2 processors, aggregator), et que 500 req/s pendant 15 s se retrouvent
+  **exactement** dans MongoDB (`make k8s-load-verify`). En cas d'échec, l'état des pods et leurs journaux sont affichés.
+
 ## Limites connues
 
 - Noms de Services fixes (`redpanda`, `redis`, `mongo`) : une seule installation par namespace.
