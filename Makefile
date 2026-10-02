@@ -16,7 +16,7 @@ CHART        := deploy/helm/pulse-stream
 HELM_FILES   := --set-file monitoring.dashboards.pulse-stream=deploy/grafana/dashboards/pulse-stream.json
 LDFLAGS := -X $(MODULE)/internal/version.Version=$(VERSION)
 
-.PHONY: help doctor fmt fmt-check vet test cover ci test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic load dashboard topics consume group group-aggregator up down ps logs docker-build docker-images app-up app-down app-logs kind-up kind-down kind-load kind-status helm-lint helm-template helm-install helm-uninstall k8s-pods k8s-smoke k8s-mongo k8s-dashboard k8s-load
+.PHONY: help doctor fmt fmt-check vet test cover ci test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic load dashboard topics consume group group-aggregator up down ps logs docker-build docker-images app-up app-down app-logs kind-up kind-down kind-load kind-status helm-lint helm-template helm-install helm-uninstall k8s-pods k8s-smoke k8s-mongo k8s-dashboard k8s-load k8s-load-verify
 
 help: ## Affiche cette aide
 	grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -177,3 +177,11 @@ k8s-dashboard: ## Ouvre Grafana (dans le cluster) dans le navigateur (macOS)
 
 k8s-load: build ## Charge sur le collector DU CLUSTER (sans verification MongoDB) : make k8s-load RATES=2000 DURATION=30s
 	./bin/loadgen -url http://localhost:18080/collect -verify=false -rates $(RATES) -duration $(DURATION) -workers $(WORKERS)
+
+# Le MongoDB du cluster n'est pas joignable depuis le Mac : on ouvre un tunnel (port-forward) le temps du test.
+# Le programme est lance en arriere-plan (&), son numero est garde dans .pf.pid pour le fermer a la fin, meme en cas d'echec.
+k8s-load-verify: build ## Charge sur le cluster AVEC verification exacte dans MongoDB : make k8s-load-verify RATES=3000 DURATION=30s
+	@kubectl port-forward --namespace $(NAMESPACE) mongo-0 27018:27017 >/dev/null 2>&1 & echo $$! > .pf.pid; \
+	sleep 3; \
+	./bin/loadgen -url http://localhost:18080/collect -mongo-uri mongodb://localhost:27018 -rates $(RATES) -duration $(DURATION) -workers $(WORKERS); \
+	status=$$?; kill $$(cat .pf.pid) 2>/dev/null; rm -f .pf.pid; exit $$status
