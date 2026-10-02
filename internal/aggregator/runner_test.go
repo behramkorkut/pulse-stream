@@ -356,3 +356,56 @@ func TestMetricsSeriesExistAtZeroFromTheStart(t *testing.T) {
 		t.Errorf("séries pulse_aggregator_events_total = %d, want 3 (counted, duplicate, skipped)", got)
 	}
 }
+
+// failingMark simule la panne de l'étape 4 : les compteurs viennent d'être écrits dans MongoDB, mais le
+// processus s'arrête avant d'avoir mémorisé les identifiants (et donc avant de valider les offsets).
+type failingMark struct{ dedupe.Store }
+
+func (failingMark) Mark(context.Context, []string) error {
+	return errors.New("arrêt simulé entre Apply et Mark")
+}
+
+// LIMITE CONNUE, documentée dans docs/architecture.md et docs/resilience.md : ce test ne vérifie pas un
+// comportement souhaité, il le MESURE. Un crash pile entre l'écriture MongoDB (Apply) et la mémorisation
+// des identifiants (Mark) laisse le lot non validé : Kafka le redonne à l'instance suivante, qui ne le
+// reconnaît pas comme déjà compté et l'ajoute une seconde fois.
+//
+// Si cette limite est un jour corrigée (écriture idempotente), ce test devra échouer : on le remplacera alors
+// par un test qui exige un seul comptage.
+func TestKnownLimitCrashBetweenApplyAndMarkCountsTheBatchTwice(t *testing.T) {
+	msgs := []kafka.Message{msgFor(t, 0, human("e1", "site-42", event.TypePageview, "desktop", "chrome", 0, true))}
+	calls := &callLog{}
+	store := &fakeStore{log: calls} // le MongoDB partagé par les deux "vies" du programme
+	memory := dedupe.NewMemory()    // le Redis partagé par les deux "vies"
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := testConfig()
+	cfg.MaxAttempts = 1 // pas de nouvel essai : la panne est définitive pour cette vie
+
+	// Première vie : écrit les compteurs, puis "meurt" avant Mark et avant le commit.
+	first := &fakeSource{pending: append([]kafka.Message(nil), msgs...), calls: calls}
+	if err := NewRunner(first, store, failingMark{Store: memory}, cfg, log).Run(context.Background()); err == nil {
+		t.Fatal("la première vie aurait dû s'arrêter sur une erreur")
+	}
+	if first.committed() != 0 {
+		t.Fatalf("offsets validés = %d, want 0 : le lot ne doit pas être validé", first.committed())
+	}
+	if pv, _, _, _ := store.totals(); pv != 1 {
+		t.Fatalf("après la première vie, pageviews = %d, want 1", pv)
+	}
+
+	// Seconde vie : Kafka redonne le même message (rien n'a été validé), la mémoire des doublons ne le connaît pas.
+	second := &fakeSource{pending: append([]kafka.Message(nil), msgs...), calls: calls}
+	runner := NewRunner(second, store, memory, cfg, log)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(ctx) }()
+	waitFor(t, "le lot relu est validé", func() bool { return second.committed() == 1 })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("seconde vie : Run() error = %v", err)
+	}
+
+	if pv, _, _, _ := store.totals(); pv != 2 {
+		t.Errorf("pageviews = %d : la limite connue prévoit un double comptage (2). Si c'est 1, elle est corrigée : mettre ce test à jour", pv)
+	}
+}

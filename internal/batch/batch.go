@@ -210,6 +210,15 @@ func NewReader(brokers []string, groupID, topic string) *kafka.Reader {
 		// que de la fin, afin de ne perdre aucun message déjà publié.
 		StartOffset: kafka.FirstOffset,
 
+		// Réaction à la disparition d'un membre. Si une instance meurt sans prévenir (crash, coupure), le courtier
+		// ne le sait qu'à l'expiration de sa session. Jusque-là ses partitions ne sont lues par personne et les
+		// autres membres ne peuvent plus valider d'offsets. Le défaut de kafka-go (30 s) a été mesuré trop long :
+		// retard jusqu'à 175 000 messages et arrêts en cascade des survivants (commit au-delà du délai d'un lot,
+		// 15 s), voir docs/resilience.md. 10 s ; Redpanda refuse moins de 6 s.
+		SessionTimeout:    10 * time.Second,
+		HeartbeatInterval: 2 * time.Second,
+		RebalanceTimeout:  15 * time.Second,
+
 		// On valide les offsets nous-mêmes (CommitMessages) après le traitement :
 		// FetchMessage ne valide rien automatiquement.
 	})

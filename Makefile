@@ -10,13 +10,17 @@ IMAGES   := collector processor aggregator loadgen
 KIND_CLUSTER ?= pulse
 KUBE_IMAGES  := collector processor aggregator
 NAMESPACE    ?= pulse
+APP          ?= aggregator
+MODE         ?= crash
+KILLS        ?= 3
+INTERVAL     ?= 40
 RELEASE      ?= pulse
 CHART        := deploy/helm/pulse-stream
 # Le dashboard Grafana reste dans deploy/grafana (source unique, partagee avec docker compose) : il est injecte dans le chart.
 HELM_FILES   := --set-file monitoring.dashboards.pulse-stream=deploy/grafana/dashboards/pulse-stream.json
 LDFLAGS := -X $(MODULE)/internal/version.Version=$(VERSION)
 
-.PHONY: help doctor fmt fmt-check vet test cover ci test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic load dashboard topics consume group group-aggregator up down ps logs docker-build docker-images app-up app-down app-logs kind-up kind-down kind-load kind-status helm-lint helm-template helm-install helm-uninstall k8s-pods k8s-smoke k8s-mongo k8s-dashboard k8s-load k8s-load-verify
+.PHONY: help doctor fmt fmt-check vet test cover ci test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic load dashboard topics consume group group-aggregator up down ps logs docker-build docker-images app-up app-down app-logs kind-up kind-down kind-load kind-status helm-lint helm-template helm-install helm-uninstall k8s-pods k8s-smoke k8s-mongo k8s-dashboard k8s-load k8s-load-verify k8s-chaos k8s-redeploy
 
 help: ## Affiche cette aide
 	grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -185,3 +189,12 @@ k8s-load-verify: build ## Charge sur le cluster AVEC verification exacte dans Mo
 	sleep 3; \
 	./bin/loadgen -url http://localhost:18080/collect -mongo-uri mongodb://localhost:27018 -rates $(RATES) -duration $(DURATION) -workers $(WORKERS); \
 	status=$$?; kill $$(cat .pf.pid) 2>/dev/null; rm -f .pf.pid; exit $$status
+
+k8s-chaos: build ## Test de panne : make k8s-chaos APP=aggregator MODE=crash KILLS=6 INTERVAL=40 RATES=2000 DURATION=120s
+	bash scripts/k8s-chaos.sh $(APP) $(MODE) $(KILLS) $(INTERVAL) -rates $(RATES) -duration $(DURATION) -workers $(WORKERS)
+
+k8s-redeploy: ## Reconstruit les 3 images, les recharge dans kind et redemarre les 3 programmes (apres un changement de code)
+	$(MAKE) docker-build IMAGES="$(KUBE_IMAGES)"
+	$(MAKE) kind-load
+	kubectl rollout restart --namespace $(NAMESPACE) deployment/collector deployment/processor deployment/aggregator
+	kubectl rollout status --namespace $(NAMESPACE) deployment/collector deployment/processor deployment/aggregator --timeout=3m
