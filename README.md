@@ -52,6 +52,11 @@ Key decisions, with their reasons, are in [docs/architecture.md](docs/architectu
   hide its own saturation (coordinated omission).
 - **Consumer lag summed over all partitions.** The library's built-in lag figure only sees one partition and
   under-reported by about 6×.
+- **MongoDB for pre-aggregated counters**, because one atomic upsert with `$inc` per (site, minute) is exactly
+  the write pattern. The trade-offs against PostgreSQL/TimescaleDB, ClickHouse and Druid/Pinot are discussed in
+  [docs/architecture.md](docs/architecture.md).
+- **Client IPs are truncated at the edge** (IPv4 /24, IPv6 /48) before reaching Kafka: the full address is never
+  stored (GDPR data minimisation).
 
 ## Quick start
 
@@ -164,8 +169,6 @@ GitHub Actions. Integration tests share one infrastructure, so each test package
 
 ## Progress
 
-The detailed development log is in [journal/journaldedev.md](journal/journaldedev.md) (French).
-
 | Step | Content | State |
 |---|---|---|
 | 0 | Skeleton, tooling, local infrastructure | done |
@@ -182,3 +185,7 @@ The detailed development log is in [journal/journaldedev.md](journal/journaldede
 | 11 | Kubernetes: kind cluster, Helm chart, Prometheus pod discovery, deployment test in CI | done |
 | 12 | Failure testing: SIGKILL under load, measured limits and fixes ([docs/resilience.md](docs/resilience.md)) | done |
 | 13 | Final README and post-mortem ([docs/postmortem.md](docs/postmortem.md)) | done |
+
+## License
+
+[MIT](LICENSE)

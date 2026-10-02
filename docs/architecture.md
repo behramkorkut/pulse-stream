@@ -93,6 +93,59 @@ Limites assumées, à documenter honnêtement :
 - La mémoire Redis du dédoublonnage croît avec le débit x le TTL. À grande échelle : fenêtre plus courte,
   filtre de Bloom, ou état local par partition.
 
+## Pourquoi MongoDB pour les compteurs
+
+Le besoin : un document par site et par minute, mis à jour en place par un flux continu de petits incréments
+concurrents, et relu par clé (« les dernières minutes d'un site »). MongoDB y répond directement :
+
+- **Upsert et `$inc` atomiques sur un document** : créer la minute au premier événement puis l'incrémenter se fait
+  en une seule opération, sans lecture préalable ni verrou côté application.
+- **Un aller-retour par lot** : `BulkWrite` envoie tous les buckets d'un lot en une seule requête.
+- **Schéma souple pour les répartitions** : ajouter une valeur à la liste blanche (`devices.*`, `browsers.*`) crée
+  un nouveau champ sans aucune migration.
+- **Exploitation minimale** pour un projet local : une image, aucun schéma à créer, un index.
+
+C'est un choix pragmatique, pas le seul possible. Les alternatives que j'examinerais pour une mise en production :
+
+| Option | Ce qu'elle apporterait | Ce qu'elle coûterait ici |
+|---|---|---|
+| **PostgreSQL / TimescaleDB** | Transactions sur une instance seule : compteurs et offset Kafka dans la même transaction, donc l'écriture idempotente sans jeu de répliques. SQL pour les analystes, agrégats continus avec TimescaleDB. | Schéma à faire évoluer pour chaque nouvelle répartition (ou une colonne JSONB) ; une extension de plus à exploiter pour TimescaleDB. |
+| **ClickHouse** | Stocker les événements bruts plutôt que des compteurs : toute dimension ou fenêtre se recalcule en SQL après coup, avec une forte compression en colonnes. Pré-agrégats possibles par vues matérialisées (`SummingMergeTree`). | Moteur conçu pour l'ajout : les mises à jour en place sont coûteuses, les fusions se font en arrière-plan (lire avec `sum()` et `GROUP BY`), le dédoublonnage se conçoit autrement (`ReplacingMergeTree`, jetons de déduplication à l'insertion). |
+| **Druid / Pinot** | OLAP temps réel qui consomme Kafka directement, avec cumul (*rollup*) à l'ingestion. | Plusieurs services à exploiter : disproportionné pour un projet qui tourne sur un portable. |
+
+Limites du choix actuel, assumées :
+
+- **Les compteurs pré-agrégés perdent le détail.** Impossible de recalculer après coup des visiteurs uniques, une
+  répartition par page ou par référent, ou une autre granularité que la minute, sans relire Kafka (dans la limite de
+  sa rétention).
+- **Les transactions exigent un jeu de répliques.** C'est ce qui bloque aujourd'hui l'écriture idempotente (voir
+  `resilience.md`) ; un jeu de répliques d'un seul nœud suffit à les activer.
+- **Un gros site concentre ses écritures sur un document par minute.** Le cumul par lot avant `$inc` limite le nombre
+  d'écritures, mais ses événements sont répartis sur toutes les partitions : plusieurs aggregators se disputent alors
+  le même document.
+- **Pas de SQL** pour les analystes : la lecture passe par l'API de requêtes de MongoDB.
+
+En production, je séparerais les deux usages : les événements bruts dans un entrepôt analytique (ClickHouse par
+exemple) comme source de vérité pour l'analyse, et une petite couche de compteurs pré-agrégés pour les tableaux de
+bord temps réel.
+
+## Données personnelles (RGPD)
+
+Un outil d'analytics web manipule des données personnelles : l'adresse IP en est une, `visitor_id` aussi
+(identifiant pseudonyme). Mesures prises :
+
+- **IP tronquée dès l'entrée.** Le collector met à zéro le dernier octet d'une IPv4 (/24) et tout ce qui suit les
+  48 premiers bits d'une IPv6 (/48) avant de publier (`internal/collector/ip.go`), comme l'option `anonymize_ip` de
+  Google Analytics. L'adresse complète n'atteint jamais Kafka, ni donc aucun stockage.
+- **Rien d'identifiant dans les compteurs** : MongoDB ne contient que des agrégats par site et par minute.
+- **Conservation bornée dans Redis** : les identifiants de dédoublonnage (1 h) et l'état des sessions (60 min)
+  expirent seuls.
+
+Ce qui resterait à faire pour un vrai déploiement : `visitor_id` et l'IP tronquée circulent encore dans les topics
+Kafka, dont la rétention n'est pas fixée explicitement (défaut du courtier) ; tronquer est de la minimisation, pas une
+anonymisation au sens strict. Dériver l'identifiant de visiteur d'un hachage salé renouvelé chaque jour (l'approche de
+Plausible) irait plus loin.
+
 ## Boucle de consommation commune (`internal/batch`)
 
 Le processor et l'aggregator partagent la même boucle : une goroutine lit Kafka, un canal tamponné alimente
@@ -205,7 +258,7 @@ défaut), puis vérifie que le pipeline a compté exactement ce que le collector
 ```
 cmd/          un dossier par programme (un main.go chacun)
 internal/     code partagé, non importable depuis l'extérieur du module
-deploy/       manifestes Kubernetes / chart Helm (plus tard)
+deploy/       configuration Prometheus et Grafana, chart Helm, cluster kind
 docs/         documentation
 scripts/      scripts utilitaires
 ```
