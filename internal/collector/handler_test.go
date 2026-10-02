@@ -81,8 +81,8 @@ func TestCollectAcceptsValidEvent(t *testing.T) {
 	if !got.ReceivedAt.Equal(fixedNow) {
 		t.Errorf("ReceivedAt = %v, want %v", got.ReceivedAt, fixedNow)
 	}
-	if got.IP != "192.0.2.1" { // adresse par défaut de httptest.NewRequest
-		t.Errorf("IP = %q, want 192.0.2.1", got.IP)
+	if got.IP != "192.0.2.0" { // 192.0.2.1 (adresse par défaut de httptest.NewRequest), tronquée en /24
+		t.Errorf("IP = %q, want 192.0.2.0", got.IP)
 	}
 	if got.UserAgent != "test-agent/1.0" {
 		t.Errorf("UserAgent = %q, want test-agent/1.0", got.UserAgent)

@@ -34,7 +34,7 @@ type Event struct {
 	Timestamp time.Time `json:"timestamp"` // instant de l'événement côté émetteur
 
 	// Champs renseignés par le serveur : toute valeur envoyée par le client est écrasée.
-	IP         string    `json:"ip,omitempty"`
+	IP         string    `json:"ip,omitempty"` // tronquée par le collector (IPv4 /24, IPv6 /48)
 	ReceivedAt time.Time `json:"received_at"`
 }
 

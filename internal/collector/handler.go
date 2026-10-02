@@ -60,7 +60,7 @@ func (a *api) collect(w http.ResponseWriter, r *http.Request) {
 
 	// Ces champs appartiennent au serveur : on écrase ce que le client a pu envoyer.
 	e.ReceivedAt = a.now().UTC()
-	e.IP = clientIP(r)
+	e.IP = anonymizeIP(clientIP(r)) // tronquée tout de suite : l'adresse complète ne quitte jamais le collector
 	if e.UserAgent == "" {
 		e.UserAgent = r.UserAgent()
 	}
