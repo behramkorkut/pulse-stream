@@ -1,0 +1,114 @@
+# Valeurs par défaut du chart pulse-stream. Tout peut être changé à l'installation :
+#   helm upgrade --install pulse deploy/helm/pulse-stream --set apps.processor.replicas=3
+
+# --- Images des trois programmes -------------------------------------------------------------------------------
+# Les images sont construites en local (make docker-build) puis copiées dans le cluster (make kind-load) :
+# aucun registre n'est impliqué. Avec le tag "latest", Kubernetes tente par défaut de TÉLÉCHARGER l'image à chaque
+# démarrage (pullPolicy Always) et échouerait ; IfNotPresent lui dit d'utiliser celle déjà présente dans le nœud.
+image:
+  repository: pulse-stream
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# --- Adresses des dépendances, vues depuis les pods ------------------------------------------------------------
+# Par défaut ce sont les Services créés par ce chart (voir "infra"). Pour utiliser une infrastructure externe,
+# mettre infra.enabled=false et changer ces trois adresses.
+config:
+  kafkaBrokers: redpanda:9092
+  redisAddr: redis:6379
+  mongoURI: mongodb://mongo:27017
+
+# --- Topics Kafka créés au démarrage (équivalent de `make topics`) ----------------------------------------------
+topics:
+  create: true
+  list:
+    - { name: raw-events, partitions: 6 }
+    - { name: enriched-events, partitions: 6 }
+    - { name: dead-letter, partitions: 3 }
+
+# --- Infrastructure de développement, déployée DANS le cluster -------------------------------------------------
+# Un seul exemplaire de chaque, sans disque persistant (les données disparaissent avec le pod) : suffisant pour
+# développer et mesurer, pas pour de la production (on utiliserait des services managés ou des opérateurs).
+infra:
+  enabled: true
+  redpanda:
+    image: redpandadata/redpanda:v24.3.1
+    resources:
+      requests: { cpu: 250m, memory: 1Gi }
+      limits: { memory: 1536Mi }
+  redis:
+    image: redis:7-alpine
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { memory: 256Mi }
+  mongo:
+    image: mongo:7
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { memory: 768Mi }
+
+# --- Les trois programmes --------------------------------------------------------------------------------------
+# needs      : dépendances dont le programme reçoit l'adresse (kafka, redis, mongo)
+# probe      : où Kubernetes vérifie que le programme est vivant et prêt. Seul le collector a un /healthz ;
+#              processor et aggregator n'ont que le port de métriques : si /metrics répond, le processus tourne.
+# requests   : ce que le planificateur RÉSERVE pour le pod. limits : plafond au-delà duquel le pod est tué (mémoire)
+#              ou ralenti (processeur). On ne fixe pas de limite de processeur : elle bride le programme même
+#              quand la machine est libre (voir docs/kubernetes.md).
+apps:
+  collector:
+    enabled: true
+    replicas: 1
+    httpPort: 8080
+    metricsPort: 9101
+    needs: [kafka]
+    probe: { path: /healthz, port: http }
+    resources:
+      requests: { cpu: 100m, memory: 64Mi }
+      limits: { memory: 256Mi }
+    # Exposition vers le Mac : NodePort 30080, publié par kind sur http://localhost:18080 (deploy/kind/kind-config.yaml)
+    service:
+      enabled: true
+      type: NodePort
+      port: 8080
+      nodePort: 30080
+  processor:
+    enabled: true
+    replicas: 1
+    metricsPort: 9102
+    needs: [kafka, redis]
+    probe: { path: /metrics, port: metrics }
+    resources:
+      requests: { cpu: 200m, memory: 128Mi }
+      limits: { memory: 384Mi }
+  aggregator:
+    enabled: true
+    replicas: 1
+    metricsPort: 9103
+    needs: [kafka, redis, mongo]
+    probe: { path: /metrics, port: metrics }
+    resources:
+      requests: { cpu: 200m, memory: 128Mi }
+      limits: { memory: 384Mi }
+
+# --- Observabilité : Prometheus et Grafana dans le cluster -------------------------------------------------------
+# Prometheus découvre tout seul les pods qui portent les annotations prometheus.io/* (voir templates/apps.yaml) :
+# passer processor.replicas de 1 à 3 ajoute 2 cibles sans rien modifier d'autre.
+# dashboards : fichiers JSON Grafana, injectés à l'installation depuis le dépôt (une seule source de vérité, pas de
+# copie dans le chart) : --set-file monitoring.dashboards.pulse-stream=deploy/grafana/dashboards/pulse-stream.json
+# (le Makefile le fait déjà).
+monitoring:
+  enabled: true
+  dashboards: {}
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    retention: 2d
+    nodePort: 30090     # -> http://localhost:19090
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { memory: 512Mi }
+  grafana:
+    image: grafana/grafana:11.4.0
+    nodePort: 30300     # -> http://localhost:13000
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { memory: 384Mi }

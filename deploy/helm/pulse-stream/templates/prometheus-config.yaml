@@ -1,0 +1,46 @@
+{{- if .Values.monitoring.enabled }}
+{{- $l := dict "root" $ "name" "prometheus" }}
+# Configuration de Prometheus, stockée dans un ConfigMap (un objet Kubernetes qui contient des fichiers) puis montée
+# dans le pod. Elle est dans son propre fichier pour que le Deployment puisse en calculer l'empreinte (voir prometheus.yaml).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 5s
+      evaluation_interval: 5s
+
+    scrape_configs:
+      - job_name: pulse-pods
+        # Au lieu d'une liste fixe d'adresses, Prometheus interroge l'API de Kubernetes : « quels pods existent
+        # dans ce namespace ? ». La liste se met à jour toute seule quand un pod naît ou meurt.
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [{{ .Release.Namespace }}]
+        relabel_configs:
+          # 1. Ne garder que les pods qui demandent à être lus (annotation prometheus.io/scrape: "true").
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          # 2. Chemin des métriques, lu dans l'annotation prometheus.io/path.
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          # 3. Adresse = IP du pod + port de l'annotation prometheus.io/port.
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          # 4. Étiquettes lisibles : job = nom du programme, instance = nom du pod (une valeur par réplique).
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            target_label: job
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: instance
+{{- end }}

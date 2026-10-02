@@ -1,0 +1,62 @@
+{{- if .Values.infra.enabled }}
+{{- $l := dict "root" $ "name" "mongo" }}
+# MongoDB : compteurs par minute. StatefulSet, comme Redpanda (programme à état). Les données sont dans un volume
+# emptyDir : elles vivent aussi longtemps que le pod. Pour les garder, il faudrait un volumeClaimTemplate.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+spec:
+  selector:
+    {{- include "pulse.selectorLabels" $l | nindent 4 }}
+  ports:
+    - name: mongo
+      port: 27017
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongo
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+spec:
+  serviceName: mongo
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "pulse.selectorLabels" $l | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "pulse.labels" $l | nindent 8 }}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: mongo
+          image: {{ .Values.infra.mongo.image }}
+          # Sans ce réglage, MongoDB dimensionne son cache d'après la mémoire de la MACHINE et non celle du pod.
+          args: ["--wiredTigerCacheSizeGB", "0.25"]
+          ports:
+            - name: mongo
+              containerPort: 27017
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+          startupProbe:
+            exec:
+              command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.infra.mongo.resources | nindent 12 }}
+      volumes:
+        - name: data
+          emptyDir: {}
+{{- end }}

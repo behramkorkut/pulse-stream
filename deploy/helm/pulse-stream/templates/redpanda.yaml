@@ -1,0 +1,67 @@
+{{- if .Values.infra.enabled }}
+{{- $l := dict "root" $ "name" "redpanda" }}
+# Redpanda (compatible Kafka). StatefulSet plutôt que Deployment : c'est l'objet prévu pour les programmes qui
+# gardent un état et une identité stable (nom de pod fixe : redpanda-0). Un seul exemplaire ici.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redpanda
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+spec:
+  selector:
+    {{- include "pulse.selectorLabels" $l | nindent 4 }}
+  ports:
+    - name: kafka
+      port: 9092
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redpanda
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+spec:
+  serviceName: redpanda
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "pulse.selectorLabels" $l | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "pulse.labels" $l | nindent 8 }}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: redpanda
+          image: {{ .Values.infra.redpanda.image }}
+          args:
+            - redpanda
+            - start
+            - --mode=dev-container
+            - --smp=1
+            - --memory=1G
+            - --reserve-memory=0M
+            - --overprovisioned
+            - --node-id=0
+            - --check=false
+            # Un seul écouteur : les clients sont dans le cluster et se joignent par le nom du Service.
+            - --kafka-addr=internal://0.0.0.0:9092
+            - --advertise-kafka-addr=internal://redpanda:9092
+          ports:
+            - name: kafka
+              containerPort: 9092
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "rpk cluster health | grep -E 'Healthy:.+true'"]
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "rpk cluster health | grep -E 'Healthy:.+true'"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.infra.redpanda.resources | nindent 12 }}
+{{- end }}

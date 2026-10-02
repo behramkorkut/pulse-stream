@@ -1,0 +1,41 @@
+{{- if .Values.topics.create }}
+{{- $l := dict "root" $ "name" "create-topics" }}
+# Crée les topics Kafka (équivalent de `make topics`). Un Job est un pod qui doit se TERMINER avec succès,
+# contrairement à un Deployment qui doit tourner indéfiniment. Il attend d'abord que Redpanda réponde, puis crée
+# chaque topic s'il n'existe pas déjà (relancer le Job ne casse rien).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-topics
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        {{- include "pulse.labels" $l | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      containers:
+        - name: rpk
+          image: {{ .Values.infra.redpanda.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              B={{ .Values.config.kafkaBrokers | quote }}
+              until rpk cluster info -X brokers="$B" >/dev/null 2>&1; do echo "attente de Redpanda..."; sleep 2; done
+              {{- range .Values.topics.list }}
+              rpk topic create {{ .name }} --partitions {{ .partitions }} --replicas 1 -X brokers="$B" || rpk topic describe {{ .name }} -X brokers="$B" >/dev/null
+              echo "topic {{ .name }} : ok"
+              {{- end }}
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 256Mi }
+{{- end }}

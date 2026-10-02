@@ -1,0 +1,24 @@
+{{- $c := .Values.apps.collector }}
+{{- if and $c.enabled $c.service.enabled }}
+{{- $l := dict "root" $ "name" "collector" }}
+# Un Service donne une adresse STABLE à un ensemble de pods (qui, eux, naissent et meurent avec des IP
+# changeantes) et répartit le trafic entre ceux qui sont prêts. NodePort le publie en plus sur un port du nœud
+# (30080) ; kind relie ce port à http://localhost:18080 sur le Mac.
+apiVersion: v1
+kind: Service
+metadata:
+  name: collector
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+spec:
+  type: {{ $c.service.type }}
+  selector:
+    {{- include "pulse.selectorLabels" $l | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $c.service.port }}
+      targetPort: http
+      {{- if eq $c.service.type "NodePort" }}
+      nodePort: {{ $c.service.nodePort }}
+      {{- end }}
+{{- end }}

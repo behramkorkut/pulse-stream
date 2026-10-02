@@ -1,0 +1,52 @@
+{{- if .Values.monitoring.enabled }}
+{{- $l := dict "root" $ "name" "grafana" }}
+# Les trois ConfigMaps de Grafana : source de données, fournisseur de dashboards, dashboards eux-mêmes.
+# Même principe que le compose : tout est déclaré par fichiers, rien à cliquer.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+data:
+  prometheus.yml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        editable: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+data:
+  dashboards.yml: |
+    apiVersion: 1
+    providers:
+      - name: pulse-stream
+        type: file
+        disableDeletion: true
+        allowUiUpdates: false
+        updateIntervalSeconds: 10
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+data:
+  {{- range $name, $json := .Values.monitoring.dashboards }}
+  {{ $name }}.json: |
+    {{- $json | nindent 4 }}
+  {{- end }}
+{{- end }}

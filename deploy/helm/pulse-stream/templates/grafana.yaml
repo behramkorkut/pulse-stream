@@ -1,0 +1,88 @@
+{{- if .Values.monitoring.enabled }}
+{{- $l := dict "root" $ "name" "grafana" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+spec:
+  type: NodePort
+  selector:
+    {{- include "pulse.selectorLabels" $l | nindent 4 }}
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+      nodePort: {{ .Values.monitoring.grafana.nodePort }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "pulse.selectorLabels" $l | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "pulse.labels" $l | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/grafana-config.yaml") . | sha256sum }}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: grafana
+          image: {{ .Values.monitoring.grafana.image }}
+          env:
+            # Usage LOCAL uniquement : accès sans identifiant, en administrateur. Ne jamais exposer tel quel.
+            - { name: GF_AUTH_ANONYMOUS_ENABLED, value: "true" }
+            - { name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: Admin }
+            - { name: GF_AUTH_DISABLE_LOGIN_FORM, value: "true" }
+            - { name: GF_USERS_DEFAULT_THEME, value: light }
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.monitoring.grafana.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 472
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/grafana
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboard-provider
+          configMap:
+            name: grafana-dashboard-provider
+{{- end }}

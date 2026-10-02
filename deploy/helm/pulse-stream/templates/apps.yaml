@@ -1,0 +1,125 @@
+{{- /*
+Un Deployment par programme (collector, processor, aggregator), généré par une boucle sur .Values.apps :
+les trois partagent la même forme, seules les valeurs changent. Dans la boucle, "." devient $app ; la racine
+(.Values, .Release...) reste accessible par "$".
+*/ -}}
+{{- range $name, $app := .Values.apps }}
+{{- if $app.enabled }}
+{{- $l := dict "root" $ "name" $name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+spec:
+  replicas: {{ $app.replicas }}
+  selector:
+    matchLabels:
+      {{- include "pulse.selectorLabels" $l | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "pulse.labels" $l | nindent 8 }}
+      # Convention (pas un objet Kubernetes) : le Prometheus du palier suivant découvre les pods qui portent
+      # ces annotations et sait quel port et quel chemin lire. Un pod de plus = une cible de plus, sans rien déclarer.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $app.metricsPort | quote }}
+        prometheus.io/path: /metrics
+    spec:
+      # Par défaut Kubernetes injecte dans chaque pod des variables d'environnement pour CHAQUE Service du namespace
+      # (REDIS_PORT=tcp://..., etc.). Inutile ici, et source de collisions de noms.
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      {{- if has "kafka" $app.needs }}
+      # Un initContainer s'exécute et se termine AVANT les conteneurs du pod. Celui-ci attend que le Job
+      # create-topics ait créé les topics : sans lui, le programme démarrerait contre des topics absents (ou, pire,
+      # créés à la volée avec une seule partition).
+      initContainers:
+        - name: wait-for-topics
+          image: {{ $.Values.infra.redpanda.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              for t in {{ range $.Values.topics.list }}{{ .name }} {{ end }}; do
+                until rpk topic list -X brokers={{ $.Values.config.kafkaBrokers | quote }} 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$t"; do
+                  echo "attente du topic $t..."; sleep 2
+                done
+              done
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { memory: 256Mi }
+      {{- end }}
+      containers:
+        - name: {{ $name }}
+          image: {{ printf "%s/%s:%s" $.Values.image.repository $name $.Values.image.tag }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          ports:
+            {{- if $app.httpPort }}
+            - name: http
+              containerPort: {{ $app.httpPort }}
+            {{- end }}
+            - name: metrics
+              containerPort: {{ $app.metricsPort }}
+          env:
+            - name: METRICS_ADDR
+              value: {{ printf ":%d" (int $app.metricsPort) | quote }}
+            {{- if $app.httpPort }}
+            - name: COLLECTOR_ADDR
+              value: {{ printf ":%d" (int $app.httpPort) | quote }}
+            {{- end }}
+            {{- if has "kafka" $app.needs }}
+            - name: KAFKA_BROKERS
+              value: {{ $.Values.config.kafkaBrokers | quote }}
+            {{- end }}
+            {{- if has "redis" $app.needs }}
+            - name: REDIS_ADDR
+              value: {{ $.Values.config.redisAddr | quote }}
+            {{- end }}
+            {{- if has "mongo" $app.needs }}
+            - name: MONGO_URI
+              value: {{ $.Values.config.mongoURI | quote }}
+            {{- end }}
+          # Liveness : « le programme est-il vivant ? » Si non, Kubernetes REDÉMARRE le conteneur.
+          # Readiness : « peut-il recevoir du trafic ? » Si non, le pod est retiré du Service, sans redémarrage.
+          livenessProbe:
+            httpGet:
+              path: {{ $app.probe.path }}
+              port: {{ $app.probe.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: {{ $app.probe.path }}
+              port: {{ $app.probe.port }}
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml $app.resources | nindent 12 }}
+          # Durcissement : le programme n'a besoin d'aucun privilège. Utilisateur non-root (65532, celui de l'image),
+          # système de fichiers en lecture seule, aucune capability Linux, filtrage des appels système par défaut.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}
+{{- end }}

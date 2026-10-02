@@ -9,9 +9,14 @@ WORKERS  ?= 128
 IMAGES   := collector processor aggregator loadgen
 KIND_CLUSTER ?= pulse
 KUBE_IMAGES  := collector processor aggregator
+NAMESPACE    ?= pulse
+RELEASE      ?= pulse
+CHART        := deploy/helm/pulse-stream
+# Le dashboard Grafana reste dans deploy/grafana (source unique, partagee avec docker compose) : il est injecte dans le chart.
+HELM_FILES   := --set-file monitoring.dashboards.pulse-stream=deploy/grafana/dashboards/pulse-stream.json
 LDFLAGS := -X $(MODULE)/internal/version.Version=$(VERSION)
 
-.PHONY: help doctor fmt fmt-check vet test cover ci test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic load dashboard topics consume group group-aggregator up down ps logs docker-build docker-images app-up app-down app-logs kind-up kind-down kind-load kind-status
+.PHONY: help doctor fmt fmt-check vet test cover ci test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic load dashboard topics consume group group-aggregator up down ps logs docker-build docker-images app-up app-down app-logs kind-up kind-down kind-load kind-status helm-lint helm-template helm-install helm-uninstall k8s-pods k8s-smoke k8s-mongo k8s-dashboard k8s-load
 
 help: ## Affiche cette aide
 	grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -145,3 +150,30 @@ kind-load: ## Copie les images pulse-stream dans le cluster (il n'a pas acces au
 kind-status: ## Etat du cluster : noeuds et pods de tous les espaces de noms
 	kubectl get nodes
 	kubectl get pods -A
+
+helm-lint: ## Verifie la syntaxe et les bonnes pratiques du chart Helm
+	helm lint $(CHART) $(HELM_FILES)
+
+helm-template: ## Affiche les manifestes Kubernetes produits par le chart (rien n'est installe)
+	helm template $(RELEASE) $(CHART) --namespace $(NAMESPACE) $(HELM_FILES) $(HELM_ARGS)
+
+helm-install: ## Installe (ou met a jour) pulse-stream dans le cluster kind
+	helm upgrade --install $(RELEASE) $(CHART) --namespace $(NAMESPACE) --create-namespace --wait --timeout 8m $(HELM_FILES) $(HELM_ARGS)
+
+helm-uninstall: ## Desinstalle pulse-stream du cluster (supprime aussi ses donnees)
+	helm uninstall $(RELEASE) --namespace $(NAMESPACE)
+
+k8s-pods: ## Pods du namespace $(NAMESPACE), avec leur noeud et leur IP
+	kubectl get pods --namespace $(NAMESPACE) -o wide
+
+k8s-smoke: ## Test de fumee du collector qui tourne DANS le cluster (publie sur localhost:18080)
+	bash scripts/smoke-collector.sh http://localhost:18080
+
+k8s-mongo: ## Nombre de compteurs-minute dans le MongoDB du cluster
+	kubectl exec --namespace $(NAMESPACE) mongo-0 -- mongosh --quiet pulse --eval 'db.minute_stats.countDocuments()'
+
+k8s-dashboard: ## Ouvre Grafana (dans le cluster) dans le navigateur (macOS)
+	open http://localhost:13000/d/pulse-stream
+
+k8s-load: build ## Charge sur le collector DU CLUSTER (sans verification MongoDB) : make k8s-load RATES=2000 DURATION=30s
+	./bin/loadgen -url http://localhost:18080/collect -verify=false -rates $(RATES) -duration $(DURATION) -workers $(WORKERS)

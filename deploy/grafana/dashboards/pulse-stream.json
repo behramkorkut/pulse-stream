@@ -621,7 +621,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "pulse_consumer_lag",
+          "expr": "max by (consumer) (pulse_consumer_lag)",
           "legendFormat": "{{consumer}}",
           "refId": "A",
           "editorMode": "code",
@@ -1112,7 +1112,7 @@
             "uid": "prometheus"
           },
           "expr": "go_goroutines",
-          "legendFormat": "{{job}}",
+          "legendFormat": "{{job}} · {{instance}}",
           "refId": "A",
           "editorMode": "code",
           "range": true
@@ -1167,7 +1167,7 @@
             "uid": "prometheus"
           },
           "expr": "go_memstats_alloc_bytes",
-          "legendFormat": "{{job}}",
+          "legendFormat": "{{job}} · {{instance}}",
           "refId": "A",
           "editorMode": "code",
           "range": true

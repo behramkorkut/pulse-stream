@@ -1,0 +1,7 @@
+apiVersion: v2
+name: pulse-stream
+description: Pipeline d'analytique temps réel (collector, processor, aggregator) et son infrastructure de développement
+type: application
+# version : celle du chart (ses fichiers). appVersion : celle des programmes qu'il déploie.
+version: 0.1.0
+appVersion: "latest"

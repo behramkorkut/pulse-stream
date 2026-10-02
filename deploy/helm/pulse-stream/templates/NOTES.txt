@@ -1,0 +1,11 @@
+pulse-stream {{ .Chart.AppVersion }} déployé dans le namespace "{{ .Release.Namespace }}".
+
+Voir les pods :
+  kubectl get pods -n {{ .Release.Namespace }}
+
+Tester le collector (publié par kind sur le Mac) :
+  curl -s http://localhost:18080/healthz
+  make k8s-smoke
+
+Journaux d'un programme :
+  kubectl logs -n {{ .Release.Namespace }} deploy/processor

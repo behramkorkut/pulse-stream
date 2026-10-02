@@ -1,0 +1,115 @@
+{{- if .Values.monitoring.enabled }}
+{{- $l := dict "root" $ "name" "prometheus" }}
+# Droit de lire la liste des pods : par défaut un pod ne peut RIEN demander à l'API de Kubernetes. On crée une
+# identité (ServiceAccount) et on lui donne le strict nécessaire (get/list/watch sur les pods, dans CE namespace
+# seulement : Role + RoleBinding, pas ClusterRole).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prometheus
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+spec:
+  type: NodePort
+  selector:
+    {{- include "pulse.selectorLabels" $l | nindent 4 }}
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http
+      nodePort: {{ .Values.monitoring.prometheus.nodePort }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  labels:
+    {{- include "pulse.labels" $l | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "pulse.selectorLabels" $l | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "pulse.labels" $l | nindent 8 }}
+      annotations:
+        # Quand le ConfigMap change, cette empreinte change, donc le modèle du pod change, donc Kubernetes
+        # redémarre le pod : sans cela, Prometheus garderait l'ancienne configuration.
+        checksum/config: {{ include (print $.Template.BasePath "/prometheus-config.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: prometheus
+      enableServiceLinks: false
+      containers:
+        - name: prometheus
+          image: {{ .Values.monitoring.prometheus.image }}
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time={{ .Values.monitoring.prometheus.retention }}
+          ports:
+            - name: http
+              containerPort: 9090
+          readinessProbe:
+            httpGet: { path: /-/ready, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /-/healthy, port: http }
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.monitoring.prometheus.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: data
+          emptyDir: {}
+{{- end }}
