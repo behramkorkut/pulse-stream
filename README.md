@@ -144,4 +144,4 @@ Le journal de développement détaillé est dans `journaldedev.md`.
 | 7 | Générateur de charge à débit imposé, vérification de bout en bout des compteurs | terminé |
 | 8 | Benchmarks : limites mesurées, retard fiable, effet du nombre de processors ([détails](docs/benchmarks.md)) | terminé |
 | 9 | Intégration continue GitHub Actions : qualité, tests, tests d'intégration, vulnérabilités | terminé |
-| 10 | Images Docker multi-étapes (distroless, non-root) et lancement des programmes en conteneurs | en cours |
+| 10 | Images Docker multi-étapes (distroless, non-root) et lancement des programmes en conteneurs | terminé |
