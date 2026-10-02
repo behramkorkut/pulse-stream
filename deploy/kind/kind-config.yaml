@@ -1,0 +1,18 @@
+# Cluster Kubernetes local pour pulse-stream, créé par `make kind-up`.
+#
+# kind ("Kubernetes IN Docker") fait tourner un cluster dans un conteneur Docker : ici, un seul nœud qui joue
+# à la fois le rôle de chef (control-plane) et d'ouvrier. C'est suffisant pour apprendre et pour tester un chart Helm.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    # Le cluster vit dans un conteneur : pour y accéder depuis le Mac, il faut publier des ports, comme avec
+    # `ports:` dans docker-compose. Le port de gauche (hostPort) est celui du Mac, celui de droite (containerPort)
+    # est un NodePort du cluster, que le chart exposera au palier suivant.
+    extraPortMappings:
+      - containerPort: 30080   # collector  -> http://localhost:18080
+        hostPort: 18080
+      - containerPort: 30090   # Prometheus -> http://localhost:19090
+        hostPort: 19090
+      - containerPort: 30300   # Grafana    -> http://localhost:13000
+        hostPort: 13000

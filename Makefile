@@ -7,9 +7,11 @@ RATES    ?= 200,500,1000
 DURATION ?= 20s
 WORKERS  ?= 128
 IMAGES   := collector processor aggregator loadgen
+KIND_CLUSTER ?= pulse
+KUBE_IMAGES  := collector processor aggregator
 LDFLAGS := -X $(MODULE)/internal/version.Version=$(VERSION)
 
-.PHONY: help doctor fmt fmt-check vet test cover ci test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic load dashboard topics consume group group-aggregator up down ps logs docker-build docker-images app-up app-down app-logs
+.PHONY: help doctor fmt fmt-check vet test cover ci test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic load dashboard topics consume group group-aggregator up down ps logs docker-build docker-images app-up app-down app-logs kind-up kind-down kind-load kind-status
 
 help: ## Affiche cette aide
 	grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -126,3 +128,20 @@ app-down: ## Arrete les 3 programmes conteneurises (l'infrastructure reste)
 
 app-logs: ## Suit les journaux des 3 programmes conteneurises (Ctrl+C pour quitter)
 	docker compose --profile app logs -f --tail=50 collector processor aggregator
+
+kind-up: ## Cree le cluster Kubernetes local (kind) nomme $(KIND_CLUSTER)
+	kind create cluster --name $(KIND_CLUSTER) --config deploy/kind/kind-config.yaml
+	kubectl cluster-info --context kind-$(KIND_CLUSTER)
+
+kind-down: ## Supprime le cluster Kubernetes local
+	kind delete cluster --name $(KIND_CLUSTER)
+
+kind-load: ## Copie les images pulse-stream dans le cluster (il n'a pas acces aux images locales de Docker)
+	@for img in $(KUBE_IMAGES); do \
+		echo "-> pulse-stream/$$img:latest"; \
+		kind load docker-image pulse-stream/$$img:latest --name $(KIND_CLUSTER) || exit 1; \
+	done
+
+kind-status: ## Etat du cluster : noeuds et pods de tous les espaces de noms
+	kubectl get nodes
+	kubectl get pods -A
