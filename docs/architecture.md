@@ -85,7 +85,11 @@ Limites assumées, à documenter honnêtement :
 - `$inc` n'est pas idempotent : si `Apply` échoue *après* avoir appliqué une partie du lot puis est retenté,
   ces compteurs peuvent être comptés deux fois. L'éviter demanderait des transactions (Mongo en jeu de
   répliques) ou un état idempotent par construction (par exemple stocker les identifiants d'événements par bucket).
-- Fenêtre Apply -> Mark : un crash pile entre les deux fait recompter un lot une fois.
+- Fenêtre Apply -> Mark : un crash pile entre les deux fait recompter un lot une fois (démontré par
+  `TestKnownLimitCrashBetweenApplyAndMarkCountsTheBatchTwice`). Les tests de panne (`docs/resilience.md`) ont montré
+  qu'une seconde cause existe : la vérification des doublons n'est pas atomique entre instances, donc deux instances
+  qui traitent les mêmes messages pendant un rééquilibrage peuvent les compter chacune. Écarts mesurés : de 0,0006 %
+  à 0,013 %, jamais de perte.
 - La mémoire Redis du dédoublonnage croît avec le débit x le TTL. À grande échelle : fenêtre plus courte,
   filtre de Bloom, ou état local par partition.
 
@@ -187,7 +191,7 @@ défaut), puis vérifie que le pipeline a compté exactement ce que le collector
   stabilise **en dessous** est une perte. Le code de sortie est non nul en cas d'échec.
 - **Limites.** Le client et le collector tournent sur le même Mac : les chiffres valent pour cette machine, pas pour un
   cluster. L'agrégation `$inc` n'est pas idempotente en cas de crash entre l'écriture et le commit (voir plus haut) :
-  la vérification ne simule pas de panne.
+  la vérification elle-même ne simule pas de panne ; `make k8s-chaos` le fait (voir `docs/resilience.md`).
 
 ## Principes de conception
 
