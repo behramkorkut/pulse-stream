@@ -41,6 +41,8 @@ make help     # liste des commandes
 make doctor   # vérifie les versions des outils
 make test     # tests Go (avec détection de data races)
 make ci       # les mêmes vérifications que la CI : format, vet, tests + couverture, build
+make docker-build   # construit les 4 images Docker (pulse-stream/<programme>)
+make app-up   # lance collector, processor et aggregator EN CONTENEURS (make app-down pour arrêter)
 make build    # compile les binaires dans ./bin
 make run-collector  # lance le collector sur :8080
 make smoke    # requêtes de test sur le collector
@@ -87,6 +89,26 @@ Mesures sur un MacBook Pro (8 cœurs) où tout tourne sur la même machine, gén
 - **1 → 2 → 3 processors** : 5 200 → 8 200 → 9 500 événements/s de bout en bout. Le gain s'essouffle quand
   l'aggregator, une seule instance, devient le maillon limitant.
 
+## Conteneurs
+
+Un seul `Dockerfile` construit les quatre programmes (`--build-arg CMD=collector|processor|aggregator|loadgen`),
+en deux étapes : une image « Go » qui compile un binaire statique, puis une image finale
+[distroless](https://github.com/GoogleContainerTools/distroless) qui ne contient que ce binaire, sans shell, et
+tourne avec un utilisateur sans privilèges (65532).
+
+```bash
+make docker-build    # pulse-stream/collector, processor, aggregator, loadgen (:latest et :<version>)
+make docker-images   # leurs tailles
+make app-up          # infrastructure + topics + collector, processor, aggregator en conteneurs
+make smoke           # envoie des requêtes au collector conteneurisé (localhost:8080)
+make app-down        # arrête les trois conteneurs
+```
+
+Dans le réseau Docker, les programmes joignent l'infrastructure par le nom des services (`redpanda:9092`,
+`redis:6379`, `mongo:27017`). Les conteneurs sont durcis : système de fichiers en lecture seule, aucune capacité
+Linux, pas d'élévation de privilèges. Ne lance pas `make app-up` en même temps que `make run-collector` & co :
+ce sont les mêmes ports.
+
 ## Intégration continue
 
 À chaque push sur `main` et à chaque pull request, GitHub Actions (`.github/workflows/ci.yml`) exécute trois jobs
@@ -97,6 +119,7 @@ en parallèle :
 | Qualité et tests unitaires | `go mod tidy` sans différence, `gofmt`, `go vet` (avec et sans les tests d'intégration), tests avec détecteur de data races et couverture, compilation |
 | Tests d'intégration | démarre Redpanda, Redis et MongoDB avec le `docker-compose.yml` du projet, puis `make test-integration` |
 | Vulnérabilités connues | `govulncheck` sur le code et ses dépendances |
+| Images Docker (×4) | construit chaque image, vérifie qu'elle ne tourne pas en root, et démarre le collector pour de vrai (test de fumée) |
 
 Les tests d'intégration partagent une seule infrastructure : chaque paquet de test a donc **sa propre base Redis**
 (aggregator 12, processor 13, sessions 14, dedupe 15), car `go test` exécute les paquets en parallèle et ces tests
@@ -121,3 +144,4 @@ Le journal de développement détaillé est dans `journaldedev.md`.
 | 7 | Générateur de charge à débit imposé, vérification de bout en bout des compteurs | terminé |
 | 8 | Benchmarks : limites mesurées, retard fiable, effet du nombre de processors ([détails](docs/benchmarks.md)) | terminé |
 | 9 | Intégration continue GitHub Actions : qualité, tests, tests d'intégration, vulnérabilités | terminé |
+| 10 | Images Docker multi-étapes (distroless, non-root) et lancement des programmes en conteneurs | en cours |

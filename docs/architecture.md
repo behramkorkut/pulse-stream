@@ -157,9 +157,16 @@ Docker fournit un DNS interne. Sans déclaration, Compose crée un réseau par d
 rend l'architecture lisible et prépare la suite (conteneurs des programmes Go, puis Kubernetes, où la notion
 de réseau et de nom de service est centrale).
 
-Aujourd'hui, nos programmes Go tournent sur le Mac, hors de ce réseau : ils joignent l'infrastructure par les
+Par défaut (`make run-collector` & co), nos programmes Go tournent sur le Mac, hors de ce réseau : ils joignent l'infrastructure par les
 ports publiés (`localhost:19092`, `6379`, `27017`), et Prometheus les joint dans l'autre sens par
-`host.docker.internal`. Une fois les programmes conteneurisés, leurs cibles deviendront `collector:9101`, etc.
+`host.docker.internal`. Avec `make app-up`, les trois programmes tournent en conteneurs *dans* ce réseau et joignent l'infrastructure par
+le nom des services ; leurs ports de métriques restent publiés sur le Mac, donc Prometheus les lit comme avant. Sous
+Kubernetes, ce sera la découverte automatique des pods qui remplacera ces adresses fixes.
+
+**Images.** Un seul `Dockerfile`, deux étapes : compilation (`golang:alpine`, `CGO_ENABLED=0`) puis image finale
+`distroless/static:nonroot`. Le binaire est statique, donc l'image finale n'a besoin ni de bibliothèque C ni de
+shell : moins de surface d'attaque, une image de quelques Mo au lieu de quelques centaines. Les dépendances Go sont
+téléchargées dans une couche à part, reconstruite seulement quand `go.mod` change.
 
 ## Générateur de charge (`cmd/loadgen`)
 

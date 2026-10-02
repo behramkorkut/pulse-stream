@@ -103,3 +103,49 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
+
+  docker:
+    name: Image Docker (${{ matrix.program }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        program: [collector, processor, aggregator, loadgen]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Construire l'image
+        run: >
+          docker build
+          --build-arg CMD=${{ matrix.program }}
+          --build-arg VERSION=${{ github.sha }}
+          -t pulse-stream/${{ matrix.program }}:ci .
+
+      # Une image de production ne doit pas tourner en root : on le vérifie à chaque construction.
+      - name: Vérifier l'utilisateur (non-root) et la taille
+        run: |
+          user="$(docker inspect -f '{{.Config.User}}' pulse-stream/${{ matrix.program }}:ci)"
+          echo "utilisateur : ${user}"
+          case "${user}" in ''|0|root|0:*|root:*) echo "l'image tourne en root" >&2; exit 1 ;; esac
+          docker images pulse-stream/${{ matrix.program }}:ci --format 'taille : {{.Size}}'
+
+      # Le collector sait fonctionner sans Kafka (PUBLISHER=log) : on démarre vraiment le conteneur
+      # et on lui envoie une requête, ce qui prouve que le binaire statique s'exécute dans l'image finale.
+      - name: Test de fumée du collector
+        if: matrix.program == 'collector'
+        run: |
+          docker run -d --name collector -p 8080:8080 -e PUBLISHER=log pulse-stream/collector:ci
+          for i in $(seq 1 20); do
+            curl -fsS http://localhost:8080/healthz && break
+            sleep 1
+          done
+          curl -fsS http://localhost:8080/healthz
+          code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/collect \
+            -d '{"id":"ci-1","type":"pageview","site_id":"s1","visitor_id":"v1","url":"https://example.com/","timestamp":"2026-01-01T00:00:00Z"}')"
+          echo "POST /collect -> ${code}"
+          test "${code}" = "202"
+
+      - name: Journaux du conteneur (en cas d'échec)
+        if: failure() && matrix.program == 'collector'
+        run: docker logs collector

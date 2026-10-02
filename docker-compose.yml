@@ -10,6 +10,17 @@ networks:
   pulse:
     name: pulse-net
 
+# Réglages communs aux programmes Go lancés en conteneurs (profil "app", voir plus bas).
+x-pulse-app: &pulse-app
+  networks: [pulse]
+  restart: on-failure
+  # Durcissement : système de fichiers en lecture seule, aucune capacité Linux, pas d'élévation de privilèges.
+  # Nos programmes n'écrivent rien sur le disque, donc rien de tout cela ne les gêne.
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: [/tmp]
+
 services:
   redpanda:
     # Redpanda parle le protocole Kafka : les clients Go ne voient aucune différence,
@@ -111,6 +122,75 @@ services:
       timeout: 3s
       retries: 20
       start_period: 10s
+
+  # ---------------------------------------------------------------------------------------------------------
+  # Les programmes Go en conteneurs : profil "app" (absent d'un simple `make up`).
+  #   make app-up    construit les images et lance collector, processor et aggregator
+  #   make app-down  les arrête
+  # À ne pas combiner avec `make run-collector` & co : ce sont les mêmes ports (8080, 9101-9103).
+  # Dans le réseau Docker, on joint l'infrastructure par le NOM du service (redpanda:9092, redis:6379, mongo:27017),
+  # pas par localhost. Les ports de métriques sont publiés : Prometheus les lit toujours via host.docker.internal.
+  # ---------------------------------------------------------------------------------------------------------
+  collector:
+    <<: *pulse-app
+    profiles: [app]
+    image: pulse-stream/collector:latest
+    build:
+      context: .
+      args:
+        CMD: collector
+        VERSION: ${PULSE_VERSION:-dev}
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports:
+      - "8080:8080" # POST /collect, GET /healthz
+      - "9101:9101" # /metrics
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  processor:
+    <<: *pulse-app
+    profiles: [app]
+    image: pulse-stream/processor:latest
+    build:
+      context: .
+      args:
+        CMD: processor
+        VERSION: ${PULSE_VERSION:-dev}
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      REDIS_ADDR: redis:6379
+    ports:
+      - "9102:9102" # /metrics
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  aggregator:
+    <<: *pulse-app
+    profiles: [app]
+    image: pulse-stream/aggregator:latest
+    build:
+      context: .
+      args:
+        CMD: aggregator
+        VERSION: ${PULSE_VERSION:-dev}
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      REDIS_ADDR: redis:6379
+      MONGO_URI: mongodb://mongo:27017
+    ports:
+      - "9103:9103" # /metrics
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
 
 volumes:
   redpanda-data:

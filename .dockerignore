@@ -1,0 +1,7 @@
+# On exclut tout, puis on autorise ce dont la compilation a besoin : le contexte envoyé à Docker reste minuscule,
+# et un fichier sensible (.env, journal, résultats de bench) ne peut jamais finir dans une image par accident.
+*
+!go.mod
+!go.sum
+!cmd
+!internal

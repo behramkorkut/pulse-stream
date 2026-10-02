@@ -6,9 +6,10 @@ TOPIC   ?= raw-events
 RATES    ?= 200,500,1000
 DURATION ?= 20s
 WORKERS  ?= 128
+IMAGES   := collector processor aggregator loadgen
 LDFLAGS := -X $(MODULE)/internal/version.Version=$(VERSION)
 
-.PHONY: help doctor fmt fmt-check vet test cover ci test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic load dashboard topics consume group group-aggregator up down ps logs
+.PHONY: help doctor fmt fmt-check vet test cover ci test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic load dashboard topics consume group group-aggregator up down ps logs docker-build docker-images app-up app-down app-logs
 
 help: ## Affiche cette aide
 	grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -107,3 +108,21 @@ ps: ## Etat des conteneurs
 
 logs: ## Suit les journaux des conteneurs
 	docker compose logs -f --tail=50
+
+docker-build: ## Construit les 4 images Docker (pulse-stream/<programme>:<version> et :latest)
+	@for c in $(IMAGES); do \
+	  echo "==> $$c"; \
+	  docker build --build-arg CMD=$$c --build-arg VERSION=$(VERSION) -t pulse-stream/$$c:$(VERSION) -t pulse-stream/$$c:latest . || exit 1; \
+	done
+
+docker-images: ## Liste les images pulse-stream et leur taille
+	docker images "pulse-stream/*"
+
+app-up: up topics ## Lance collector, processor et aggregator EN CONTENEURS (construit les images)
+	PULSE_VERSION=$(VERSION) docker compose --profile app up -d --build
+
+app-down: ## Arrete les 3 programmes conteneurises (l'infrastructure reste)
+	docker compose --profile app rm -sf collector processor aggregator
+
+app-logs: ## Suit les journaux des 3 programmes conteneurises (Ctrl+C pour quitter)
+	docker compose --profile app logs -f --tail=50 collector processor aggregator
