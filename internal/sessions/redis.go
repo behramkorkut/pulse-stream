@@ -10,7 +10,10 @@ import (
 	"github.com/behramkorkut/pulse-stream/internal/event"
 )
 
-const keyPrefix = "pulse:session:"
+const (
+	keyPrefix    = "pulse:session:"        // état d'un visiteur (session en cours)
+	resultPrefix = "pulse:session-result:" // résultat mémorisé du rattachement d'un événement
+)
 
 // touchScript lit puis met à jour l'état d'un visiteur EN UNE SEULE opération atomique.
 //
@@ -18,13 +21,22 @@ const keyPrefix = "pulse:session:"
 // du processor pourrait modifier la même clé (course entre deux lectures-écritures). Redis exécute
 // un script d'un bloc, sans intercaler aucune autre commande : la lecture et l'écriture sont atomiques.
 //
-//	KEYS[1] clé du visiteur
+//	KEYS[1] état du visiteur              KEYS[2] résultat mémorisé de cet événement
 //	ARGV[1] instant de l'événement (ms)   ARGV[2] inactivité maximale (ms)
 //	ARGV[3] identifiant proposé si nouvelle session
-//	ARGV[4] identifiant de l'événement    ARGV[5] durée de vie de la clé (secondes)
+//	ARGV[4] identifiant de l'événement    ARGV[5] durée de vie des deux clés (secondes)
 //
 // Retourne {identifiant de session, 1 si cet événement est celui qui a ouvert la session}.
+//
+// Le résultat de chaque événement est mémorisé ("<0|1>:<identifiant de session>") et renvoyé tel quel au rejeu.
+// Le recalculer serait faux quand le visiteur a ouvert une nouvelle session entre-temps : dans un lot rejoué qui
+// franchit une coupure, les premiers événements seraient rattachés à la session suivante.
 const touchScript = `
+local memo = redis.call('GET', KEYS[2])
+if memo then
+  return {string.sub(memo, 3), tonumber(string.sub(memo, 1, 1))}
+end
+
 local ts      = tonumber(ARGV[1])
 local timeout = tonumber(ARGV[2])
 
@@ -47,6 +59,8 @@ redis.call('EXPIRE', KEYS[1], tonumber(ARGV[5]))
 
 local is_new = 0
 if first == ARGV[4] then is_new = 1 end
+
+redis.call('SET', KEYS[2], is_new .. ':' .. id, 'EX', tonumber(ARGV[5]))
 return {id, is_new}
 `
 
@@ -60,6 +74,8 @@ type Redis struct {
 
 // NewRedis crée un Store Redis. La clé d'un visiteur expire après deux fois le délai d'inactivité :
 // passé ce délai, la clé ne pourrait de toute façon plus rattacher aucun événement en temps réel.
+// Le résultat mémorisé de chaque événement a la même durée de vie : c'est la fenêtre dans laquelle un
+// rejeu redonne exactement le même résultat. Coût : une clé par événement humain pendant cette durée.
 func NewRedis(client redis.Scripter, timeout time.Duration) *Redis {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
@@ -75,7 +91,7 @@ func NewRedis(client redis.Scripter, timeout time.Duration) *Redis {
 // Touch applique la règle de session dans Redis.
 func (r *Redis) Touch(ctx context.Context, e event.Event) (Session, error) {
 	res, err := r.script.Run(ctx, r.client,
-		[]string{keyPrefix + sessionKey(e)},
+		[]string{keyPrefix + sessionKey(e), resultPrefix + eventKey(e)},
 		e.Timestamp.UnixMilli(),
 		r.timeout.Milliseconds(),
 		NewSessionID(e.SiteID, e.VisitorID, e.ID),

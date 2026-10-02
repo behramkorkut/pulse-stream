@@ -120,6 +120,40 @@ func runStoreContract(t *testing.T, newStore func(t *testing.T) Store) {
 		}
 	})
 
+	// Régression : un lot rejoué (crash avant l'écriture, ou nouvel essai après une erreur Redis sur un autre shard)
+	// qui franchit une coupure de session. Sans mémoire du résultat de chaque événement, e1 et e2 étaient rattachés
+	// à la session de e3 au rejeu : une seule session comptée au lieu de deux.
+	t.Run("rejouer un lot qui franchit une coupure de session redonne les mêmes résultats", func(t *testing.T) {
+		s := newStore(t)
+		lot := []event.Event{
+			ev("s", "v", "e1", t0),
+			ev("s", "v", "e2", t0.Add(10*time.Minute)),
+			ev("s", "v", "e3", t0.Add(50*time.Minute)), // 40 min après e2 : nouvelle session
+		}
+		first := make([]Session, len(lot))
+		for i, e := range lot {
+			first[i] = touch(t, s, e)
+		}
+		if first[2].ID == first[0].ID || !first[2].New {
+			t.Fatalf("e3 = %+v, want une nouvelle session (précondition du test)", first[2])
+		}
+
+		for i, e := range lot {
+			if again := touch(t, s, e); again != first[i] {
+				t.Errorf("rejeu de %s = %+v, want %+v", e.ID, again, first[i])
+			}
+		}
+	})
+
+	t.Run("le même identifiant d'événement chez deux visiteurs reste deux événements", func(t *testing.T) {
+		s := newStore(t)
+		a := touch(t, s, ev("s", "v-1", "e1", t0))
+		b := touch(t, s, ev("s", "v-2", "e1", t0))
+		if a.ID == b.ID || !b.New {
+			t.Errorf("b = %+v, want une session neuve distincte de %s", b, a.ID)
+		}
+	})
+
 	t.Run("l'identifiant est déterministe", func(t *testing.T) {
 		e := ev("s", "v", "e1", t0)
 		one := touch(t, newStore(t), e)

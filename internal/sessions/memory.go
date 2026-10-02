@@ -14,8 +14,9 @@ import (
 type Memory struct {
 	timeout time.Duration
 
-	mu    sync.Mutex
-	state map[string]memState
+	mu      sync.Mutex
+	state   map[string]memState
+	results map[string]Session // résultat de chaque événement déjà rattaché, par eventKey
 }
 
 type memState struct {
@@ -29,16 +30,23 @@ func NewMemory(timeout time.Duration) *Memory {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	return &Memory{timeout: timeout, state: map[string]memState{}}
+	return &Memory{timeout: timeout, state: map[string]memState{}, results: map[string]Session{}}
 }
 
 // Touch applique la règle de session. Elle reproduit à l'identique le script Lua de Redis.
 func (m *Memory) Touch(_ context.Context, e event.Event) (Session, error) {
 	ts := e.Timestamp.UnixMilli()
 	key := sessionKey(e)
+	evKey := eventKey(e)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Rejeu : l'événement a déjà été rattaché, on redonne le même résultat sans toucher à l'état. Le recalculer
+	// serait faux si le visiteur a ouvert une nouvelle session depuis : l'événement y serait rattaché à tort.
+	if res, ok := m.results[evKey]; ok {
+		return res, nil
+	}
 
 	st, ok := m.state[key]
 	if !ok || ts-st.last > m.timeout.Milliseconds() {
@@ -51,7 +59,9 @@ func (m *Memory) Touch(_ context.Context, e event.Event) (Session, error) {
 	}
 	m.state[key] = st
 
-	// "New" compare avec le premier événement mémorisé plutôt que de dire "j'ai créé la session
-	// à cet appel" : ainsi, retraiter le premier événement redonne New = true (idempotence).
-	return Session{ID: st.id, New: st.first == e.ID}, nil
+	// "New" compare avec le premier événement de la session plutôt que de dire "j'ai créé la session à cet
+	// appel" : même sans résultat mémorisé (expiré dans Redis), retraiter le premier événement redonne New = true.
+	res := Session{ID: st.id, New: st.first == e.ID}
+	m.results[evKey] = res
+	return res, nil
 }

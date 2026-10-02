@@ -38,9 +38,12 @@ infra:
       limits: { memory: 1536Mi }
   redis:
     image: redis:7-alpine
+    # Tout expire en 1 h, mais un run de chaos (~360 000 événements) occupe ~110 Mo pendant cette heure (sessions
+    # ~200 o et dédoublonnage ~120 o par événement) : 256 Mi ne tenaient pas deux runs. Redis sans disque : un
+    # OOMKill effacerait sessions et doublons, d'où une marge large.
     resources:
       requests: { cpu: 50m, memory: 64Mi }
-      limits: { memory: 256Mi }
+      limits: { memory: 1Gi }
   mongo:
     image: mongo:7
     resources:

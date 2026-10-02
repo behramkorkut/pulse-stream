@@ -8,8 +8,9 @@
 //
 //   - Le temps est celui de l'ÉVÉNEMENT (son Timestamp), pas celui de l'horloge du serveur.
 //     Ainsi, retraiter un arriéré d'événements donne les mêmes sessions qu'en temps réel.
-//   - L'identifiant de session est DÉTERMINISTE (dérivé du premier événement) : traiter deux
-//     fois le même événement, après un crash par exemple, donne le même résultat.
+//   - L'identifiant de session est DÉTERMINISTE (dérivé du premier événement), et le résultat de
+//     chaque événement est MÉMORISÉ : rejouer un lot après un crash ou un nouvel essai redonne
+//     exactement les mêmes rattachements, même si le lot franchit une coupure de session.
 package sessions
 
 import (
@@ -32,8 +33,9 @@ type Session struct {
 
 // Store rattache un événement à une session, en créant la session si nécessaire.
 //
-// Touch doit être idempotent : rappeler Touch avec le même événement retourne le même résultat.
-// C'est ce qui rend sûr le retraitement d'un lot après une panne.
+// Touch doit être idempotent : rappeler Touch avec le même événement retourne le même résultat,
+// même si d'autres événements du visiteur ont été traités entre-temps. C'est ce qui rend sûr le
+// retraitement d'un lot après une panne.
 type Store interface {
 	Touch(ctx context.Context, e event.Event) (Session, error)
 }
@@ -47,4 +49,12 @@ func NewSessionID(siteID, visitorID, firstEventID string) string {
 // sessionKey identifie l'état d'un visiteur : une session en cours par site et par visiteur.
 func sessionKey(e event.Event) string {
 	return e.SiteID + "/" + e.VisitorID
+}
+
+// eventKey identifie un événement d'un visiteur, pour mémoriser le résultat de son rattachement.
+// Une empreinte plutôt qu'une concaténation : avec des séparateurs ambigus, ("a/b", "c") et ("a", "b/c")
+// donneraient la même clé, et un visiteur recevrait le résultat mémorisé d'un autre.
+func eventKey(e event.Event) string {
+	sum := sha256.Sum256([]byte(e.SiteID + "\x00" + e.VisitorID + "\x00" + e.ID))
+	return hex.EncodeToString(sum[:16])
 }

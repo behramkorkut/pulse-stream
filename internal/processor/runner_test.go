@@ -425,6 +425,64 @@ func TestRunnerRetriesWhenSessionStoreIsFlaky(t *testing.T) {
 	}
 }
 
+// failOnceStore fait échouer le premier rattachement de l'événement failID, puis délègue normalement.
+type failOnceStore struct {
+	mu     sync.Mutex
+	inner  sessions.Store
+	failID string
+	failed bool
+}
+
+func (f *failOnceStore) Touch(ctx context.Context, e event.Event) (sessions.Session, error) {
+	f.mu.Lock()
+	fail := e.ID == f.failID && !f.failed
+	if fail {
+		f.failed = true
+	}
+	f.mu.Unlock()
+
+	if fail {
+		return sessions.Session{}, errors.New("redis indisponible")
+	}
+	return f.inner.Touch(ctx, e)
+}
+
+// Régression : quand un rattachement échoue, tout le lot est transformé de nouveau. Les événements déjà rattachés
+// au premier essai doivent garder exactement leur session, même quand le lot franchit une coupure de session.
+func TestRunnerRetryKeepsSessionsAcrossABoundary(t *testing.T) {
+	at := func(hh, mm int) time.Time { return time.Date(2026, 9, 30, hh, mm, 0, 0, time.UTC) }
+	msgs := []kafka.Message{
+		kmsg(0, "site-42/v-1", rawEventAt("a", chromeUA, at(11, 0))),
+		kmsg(1, "site-42/v-1", rawEventAt("b", chromeUA, at(11, 10))),
+		kmsg(2, "site-42/v-1", rawEventAt("d", chromeUA, at(11, 50))),        // 40 min après b : nouvelle session
+		kmsg(3, "site-42/v-2", rawEventFor("z", "v-2", chromeUA, at(11, 0))), // échoue au premier essai
+	}
+	cfg := testConfig()
+	cfg.Workers = 1 // un seul shard, dans l'ordre : a, b et d sont rattachés AVANT l'échec de z, puis de nouveau
+	cfg.BatchSize = len(msgs)
+	cfg.Sessions = &failOnceStore{inner: sessions.NewMemory(sessions.DefaultTimeout), failID: "z"}
+	r, src, dst := newTestRunner(msgs, cfg)
+	stop := startRunner(t, r)
+
+	waitFor(t, "les 4 offsets validés", func() bool { return len(src.committed()) == 4 })
+	if err := stop(); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if n := dst.attemptCount(); n != 1 {
+		t.Fatalf("%d écritures, want 1 : le test suppose un seul lot", n)
+	}
+
+	got := dst.messages()
+	a, b, d := decodeEnriched(t, got[0]), decodeEnriched(t, got[1]), decodeEnriched(t, got[2])
+	if !a.NewSession || b.SessionID != a.SessionID || b.NewSession {
+		t.Errorf("a = %s (new=%v), b = %s (new=%v) : want b dans la session ouverte par a",
+			a.SessionID, a.NewSession, b.SessionID, b.NewSession)
+	}
+	if d.SessionID == a.SessionID || !d.NewSession {
+		t.Errorf("d = %s (new=%v) : want une seconde session, distincte de %s", d.SessionID, d.NewSession, a.SessionID)
+	}
+}
+
 func TestRunnerWritesAndCommitsNothingWhenSessionStoreIsDown(t *testing.T) {
 	cfg := testConfig()
 	cfg.Sessions = &flakyStore{inner: sessions.NewMemory(sessions.DefaultTimeout), failFirst: -1}

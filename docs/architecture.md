@@ -46,9 +46,9 @@ des doublons possibles, jamais de perte (**au moins une fois**). Le dédoublonna
 Une session regroupe les événements d'un visiteur (par site) espacés d'au plus 30 minutes. Trois choix structurants :
 
 - **Temps de l'événement**, pas de l'horloge : retraiter un arriéré donne les mêmes sessions qu'en temps réel.
-- **Identifiant déterministe** (empreinte du site, du visiteur et du premier événement) et drapeau
-  `new_session` calculé en comparant avec le premier événement mémorisé : traiter deux fois le même événement
-  donne exactement le même résultat (idempotence, indispensable en "au moins une fois").
+- **Idempotence** : identifiant de session déterministe (empreinte du site, du visiteur et du premier événement),
+  et résultat de chaque événement mémorisé dans Redis pendant 60 min. Rejouer un lot, après un crash ou lors d'un
+  nouvel essai, redonne exactement les mêmes rattachements (indispensable en "au moins une fois").
 - **Atomicité** : la lecture et la mise à jour de l'état du visiteur se font dans un script Lua exécuté d'un
   bloc par Redis, sans course possible entre deux instances du processor.
 
@@ -58,6 +58,17 @@ avoir écrit ni validé : mieux vaut un retard qu'un événement publié sans se
 
 Le magasin `Memory` sert de référence exécutable de la règle : les mêmes tests de contrat s'appliquent à
 `Memory` et à `Redis`.
+
+**Correction : l'idempotence ne tenait pas à travers une coupure de session.** La première version recalculait le
+rattachement à chaque appel, à partir de l'état courant du visiteur. C'était juste pour rejouer un événement de la
+session en cours, faux pour un lot qui franchit une coupure : avec e1 (10 h), e2 (10 h 10) et e3 (10 h 50, nouvelle
+session), le rejeu rattachait e1 et e2 à la session de e3, et une seule session était comptée au lieu de deux. Deux
+chemins y mènent : un crash du processor avant l'écriture du lot, et le nouvel essai du lot entier dès qu'un seul appel
+Redis échoue. Aucun test ne le voyait : le générateur de charge date tous les événements de l'instant présent. Le
+script mémorise désormais le résultat de chaque événement (clé `pulse:session-result:<empreinte>`, même durée de vie
+que l'état du visiteur) et le renvoie tel quel au rejeu. Coût mesuré sur Redis 7 : environ 200 octets par événement
+humain pendant 60 min, en plus des quelque 120 octets du dédoublonnage. Tests de régression :
+`TestRunnerRetryKeepsSessionsAcrossABoundary` et le cas de contrat « rejouer un lot qui franchit une coupure ».
 
 ## Aggregator : dédoublonner, compter, écrire
 
