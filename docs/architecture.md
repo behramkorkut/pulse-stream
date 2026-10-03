@@ -47,14 +47,17 @@ Une session regroupe les événements d'un visiteur (par site) espacés d'au plu
 
 - **Temps de l'événement**, pas de l'horloge : retraiter un arriéré donne les mêmes sessions qu'en temps réel.
 - **Idempotence** : identifiant de session déterministe (empreinte du site, du visiteur et du premier événement),
-  et résultat de chaque événement mémorisé dans Redis pendant 60 min. Rejouer un lot, après un crash ou lors d'un
+  et résultat de chaque événement mémorisé dans Redis pendant 90 min. Rejouer un lot, après un crash ou lors d'un
   nouvel essai, redonne exactement les mêmes rattachements (indispensable en "au moins une fois").
 - **Atomicité** : la lecture et la mise à jour de l'état du visiteur se font dans un script Lua exécuté d'un
   bloc par Redis, sans course possible entre deux instances du processor.
 
-Un événement en retard est rattaché à la session courante sans faire reculer le dernier instant vu. Les
-robots n'ont pas de session. Si Redis est indisponible, le lot est retenté puis le processor s'arrête sans
-avoir écrit ni validé : mieux vaut un retard qu'un événement publié sans session.
+Un événement en retard est rattaché à la session courante sans faire reculer le dernier instant vu. C'est une
+simplification : s'il appartenait en réalité à une session plus ancienne, il rejoint quand même la session en cours.
+Un traitement exact demanderait des fenêtres de session capables de fusionner (comme celles de Flink) ; le retard
+maximal toléré (voir plus bas) borne au moins l'erreur. Les robots n'ont pas de session. Si Redis est indisponible, le
+lot est retenté puis le processor s'arrête sans avoir écrit ni validé : mieux vaut un retard qu'un événement publié
+sans session.
 
 Le magasin `Memory` sert de référence exécutable de la règle : les mêmes tests de contrat s'appliquent à
 `Memory` et à `Redis`.
@@ -63,12 +66,13 @@ Le magasin `Memory` sert de référence exécutable de la règle : les mêmes te
 rattachement à chaque appel, à partir de l'état courant du visiteur. C'était juste pour rejouer un événement de la
 session en cours, faux pour un lot qui franchit une coupure : avec e1 (10 h), e2 (10 h 10) et e3 (10 h 50, nouvelle
 session), le rejeu rattachait e1 et e2 à la session de e3, et une seule session était comptée au lieu de deux. Deux
-chemins y mènent : un crash du processor avant l'écriture du lot, et le nouvel essai du lot entier dès qu'un seul appel
-Redis échoue. Aucun test ne le voyait : le générateur de charge date tous les événements de l'instant présent. Le
-script mémorise désormais le résultat de chaque événement (clé `pulse:session-result:<empreinte>`, même durée de vie
-que l'état du visiteur) et le renvoie tel quel au rejeu. Coût mesuré sur Redis 7 : environ 200 octets par événement
-humain pendant 60 min, en plus des quelque 150 octets du dédoublonnage. Tests de régression :
-`TestRunnerRetryKeepsSessionsAcrossABoundary` et le cas de contrat « rejouer un lot qui franchit une coupure ».
+chemins y mènent : un crash du processor avant l'écriture du lot, et le nouvel essai du lot entier dès qu'un seul
+appel Redis échoue. Aucun test ne le voyait : le générateur de charge datait alors tous les événements de l'instant présent.
+Le script mémorise désormais le résultat de chaque événement (clé `pulse:session-result:<empreinte>`, même durée de
+vie que l'état du visiteur) et le renvoie tel quel au rejeu. Coût mesuré sur Redis 7 : environ 200 octets par
+événement humain pendant la durée de vie de l'état (90 min aujourd'hui), en plus des quelque 150 octets du
+dédoublonnage. Tests de régression : `TestRunnerRetryKeepsSessionsAcrossABoundary` et le cas de contrat « rejouer un
+lot qui franchit une coupure ».
 
 ## Aggregator : dédoublonner, compter, écrire
 
@@ -80,7 +84,8 @@ site et par minute (`_id = site|2026-09-30T11:00Z`) avec les compteurs `pageview
    (même site, même identifiant) ;
 2. demander à Redis quels événements (site et identifiant) ont déjà été comptés (`MGET`) et les écarter ;
 3. cumuler les compteurs dans MongoDB (un seul `BulkWrite` d'upserts avec `$inc`) ;
-4. **seulement alors**, mémoriser les identifiants comptés dans Redis (`SET ... EX`, TTL d'une heure) ;
+4. **seulement alors**, mémoriser les identifiants comptés dans Redis (`SET ... EX`, TTL de 90 min, voir
+   « Événements en retard ») ;
 5. puis valider les offsets Kafka.
 
 Pourquoi cet ordre : un crash entre 3 et 4 fait recompter le lot (au pire des doublons), un crash entre 4 et 5
@@ -162,13 +167,37 @@ Un outil d'analytics web manipule des données personnelles : l'adresse IP en es
   48 premiers bits d'une IPv6 (/48) avant de publier (`internal/collector/ip.go`), comme l'option `anonymize_ip` de
   Google Analytics. L'adresse complète n'atteint jamais Kafka, ni donc aucun stockage.
 - **Rien d'identifiant dans les compteurs** : MongoDB ne contient que des agrégats par site et par minute.
-- **Conservation bornée dans Redis** : les identifiants de dédoublonnage (1 h) et l'état des sessions (60 min)
+- **Conservation bornée dans Redis** : les identifiants de dédoublonnage et l'état des sessions (90 min chacun)
   expirent seuls.
 
 Ce qui resterait à faire pour un vrai déploiement : `visitor_id` et l'IP tronquée circulent encore dans les topics
 Kafka, dont la rétention n'est pas fixée explicitement (défaut du courtier) ; tronquer est de la minimisation, pas une
 anonymisation au sens strict. Dériver l'identifiant de visiteur d'un hachage salé renouvelé chaque jour (l'approche de
 Plausible) irait plus loin.
+
+## Événements en retard (retard maximal toléré)
+
+Le pipeline compte en temps de l'événement : un événement qui arrive tard retombe dans sa minute. Mais deux mémoires ont
+une durée de vie : celle des doublons et l'état des sessions. Un événement plus vieux qu'elles serait compté deux fois
+s'il est renvoyé, ou rattaché à une session qui n'est plus la sienne. Il faut donc une limite explicite, l'*allowed
+lateness* des moteurs de streaming : `event.MaxLateness`, **1 h**.
+
+- **Mesurée depuis la réception par le collector** (`received_at - timestamp`), pas depuis le traitement : un arriéré
+  dans Kafka (consommateur arrêté une heure) ne doit pas rendre « trop vieux » des événements arrivés à l'heure. Sans
+  `received_at` (autre producteur), l'heure du traitement sert de référence.
+- **Au-delà, dead-letter, raison `too_late`** : l'événement est conservé intact, compté dans
+  `pulse_processor_dead_letters_total{reason="too_late"}`, et un traitement par lots pourra le réintégrer. Le
+  collector, lui, l'accepte (202) : c'est le processor qui applique les règles métier.
+- **Les durées de vie en découlent.** Dédoublonnage : au moins `MaxLateness + MaxFutureSkew` (65 min), sinon le renvoi
+  tardif d'un événement déjà compté serait recompté ; 90 min par défaut, et l'aggregator refuse de démarrer avec
+  moins (`DEDUPE_TTL_MIN`). État des sessions : délai d'inactivité + `MaxLateness` (90 min), pour qu'un événement
+  encore accepté retrouve sa session.
+- **Testé de bout en bout** : le générateur de charge envoie ~2 % d'événements en retard dans la limite (de 1 à 55 min,
+  comptés) et ~0,5 % trop en retard (plus de 65 min, attendus en dead-letter, exclus de l'attendu). Les marges de
+  5 min autour de la limite évitent qu'une attente en file fasse changer un événement de catégorie.
+
+Avant cette règle, le collector acceptait n'importe quel événement ancien alors que les deux mémoires ne duraient
+qu'une heure, et le générateur datait tout de l'instant présent : aucune de ces incohérences n'était testée.
 
 ## Boucle de consommation commune (`internal/batch`)
 
@@ -194,10 +223,11 @@ Le trafic de supervision est ainsi séparé du trafic métier. Les métriques ut
 | `pulse_batch_size{consumer}` / `pulse_batch_duration_seconds{consumer}` | histogrammes | taille et durée des lots |
 | `pulse_consumer_lag{consumer}` | jauge | messages publiés mais pas encore validés par le groupe, **somme de toutes les partitions** |
 | `pulse_processor_events_total{outcome}` | compteur | écrits : `enriched` ou `dead_letter` |
-| `pulse_processor_dead_letters_total{reason}` | compteur | rejets par raison |
+| `pulse_processor_dead_letters_total{reason}` | compteur | rejets par raison (`invalid_json`, `invalid_event`, `encode_error`, `too_late`) |
 | `pulse_aggregator_events_total{outcome}` | compteur | `counted`, `duplicate`, `skipped` |
 | `pulse_aggregator_buckets_written_total` | compteur | documents (site, minute) mis à jour |
 | `pulse_aggregator_store_duration_seconds` | histogramme | durée d'un appel MongoDB |
+| `pulse_end_to_end_latency_seconds` | histogramme | **fraîcheur** : de la réception par le collector à l'écriture des compteurs dans MongoDB |
 
 Les séries étiquetées (par code, par issue, par raison) sont créées à zéro au démarrage. Une série qui n'existe
 pas affiche « No data » au lieu de 0 ; pire, `rate()` a besoin de deux points pour mesurer une variation : une
@@ -208,6 +238,13 @@ Règles suivies : un compteur n'avance qu'une fois l'action réellement réussie
 échoue) ; les labels n'ont que quelques valeurs possibles (jamais d'identifiant ni d'URL : chaque valeur
 distincte crée une série en mémoire, c'est l'« explosion de cardinalité »). Les débits se déduisent des
 compteurs (`rate(...)` dans Prometheus), on n'expose pas de débit déjà calculé.
+
+**Fraîcheur de bout en bout.** C'est l'indicateur principal d'un pipeline temps réel : combien de temps un événement
+met à devenir visible. Le retard (*lag*) se compte en messages, pas en secondes : 10 000 messages de retard, c'est
+une seconde à fort débit et une heure à faible débit. L'aggregator mesure donc, pour chaque événement compté,
+`instant d'écriture dans MongoDB - received_at` (un doublon n'est pas mesuré deux fois). Le dashboard en montre le
+p50 et le p99. La mesure compare deux horloges (collector et aggregator) : elle suppose des machines synchronisées
+(NTP), ce qui est le cas sur un seul nœud.
 
 **Mesure du retard.** Le retard d'un groupe est `fin de partition − offset validé`, additionné sur toutes les
 partitions (`internal/kafkautil/lag.go`, via l'API d'administration de Kafka, toutes les 5 s en arrière-plan).
@@ -261,7 +298,8 @@ défaut), puis vérifie que le pipeline a compté exactement ce que le collector
   dans le p95/p99. Si le client lui-même sature (plus de worker libre, file pleine), la requête est comptée « perdue »
   côté client, et non masquée.
 - **Trafic mélangé.** Plusieurs sites et visiteurs, pageviews et clics, ~5 % de robots, ~2 % de doublons (même `id`
-  rejoué), ~1 % de messages invalides (400 / 422). Graine fixe (`-seed`) : un même run est reproductible.
+  rejoué), ~1 % de messages invalides (400 / 422), ~2 % d'événements en retard et ~0,5 % trop en retard (voir
+  « Événements en retard »). Graine fixe (`-seed`) : un même run est reproductible.
 - **Vérification de bout en bout.** Chaque événement *accepté* (202, invalide exclu, un seul par `id`) est compté ;
   le générateur interroge ensuite MongoDB (sites préfixés `load-<run>-`) jusqu'à stabilisation. Un compteur qui
   **dépasse** l'attendu est un double comptage (échec immédiat, les compteurs ne font que croître) ; un total qui se

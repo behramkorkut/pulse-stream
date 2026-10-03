@@ -67,11 +67,11 @@ second directly.
 event gives the same result, and a test checked it, but only for an event of the current session. Replaying a batch
 that crosses a session boundary (e1 at 10:00, e2 at 10:10, e3 at 10:50) reattached e1 and e2 to e3's session, so two
 sessions were counted as one. Two paths lead there: a processor crash before the batch is written, and the retry of the
-whole batch when a single Redis call fails. A code review found it, not my tests. The load generator stamps every
+whole batch when a single Redis call fails. A code review found it, not my tests. The load generator stamped every
 event with the current time, so no batch ever crossed a boundary, and the end-to-end check does not verify sessions.
 The fix stores the result of each event in Redis, with the same lifetime as the visitor's state, and returns it
-unchanged on replay. It costs about 200 bytes per human event for an hour, so I also raised Redis's memory limit in
-the chart. Lesson: test an idempotence claim by replaying sequences, not single calls, and make sure the test data
+unchanged on replay. It costs about 200 bytes per human event while the visitor's state lives, so I also raised
+Redis's memory limit in the chart. Lesson: test an idempotence claim by replaying sequences, not single calls, and make sure the test data
 actually contains the case the claim is about.
 
 **A smaller one.** The Docker builder in my environment did not support BuildKit cache mounts, so a Dockerfile

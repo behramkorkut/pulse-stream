@@ -14,6 +14,9 @@ les commandes ci-dessous.
 | Topics | `raw-events` et `enriched-events` : 6 partitions chacun, 1 réplique |
 | Mélange de trafic | 20 % de clics, 5 % de robots, 2 % de renvois (même `id`), 1 % d'invalides (400/422) |
 
+Depuis ces mesures, le mélange par défaut inclut aussi ~2 % d'événements en retard et ~0,5 % trop en retard (voir
+`architecture.md`, « Événements en retard ») : les chiffres ci-dessous ont été mesurés sans eux.
+
 Conséquence importante : le générateur, le collector et les consommateurs **se partagent les mêmes 8 cœurs**. Les
 chiffres absolus sont donc plus bas que ce que chaque maillon ferait seul. Les **comparaisons entre configurations**
 sont fiables ; les valeurs absolues ne se transposent pas à un cluster.

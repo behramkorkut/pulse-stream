@@ -52,6 +52,11 @@ Key decisions, with their reasons, are in [docs/architecture.md](docs/architectu
   hide its own saturation (coordinated omission).
 - **Consumer lag summed over all partitions.** The library's built-in lag figure only sees one partition and
   under-reported by about 6×.
+- **Event time with an explicit allowed lateness (1 h).** Late events land in the right minute; events more than an
+  hour late (measured from reception, not processing) go to the dead-letter topic, because the duplicate memory and
+  the session state are sized to that window. The load generator sends late and too-late events on purpose.
+- **End-to-end freshness is measured**: a histogram of the time from collector reception to counters written in
+  MongoDB (`pulse_end_to_end_latency_seconds`), shown as p50/p99 on the dashboard.
 - **MongoDB for pre-aggregated counters**, because one atomic upsert with `$inc` per (site, minute) is exactly
   the write pattern. The trade-offs against PostgreSQL/TimescaleDB, ClickHouse and Druid/Pinot are discussed in
   [docs/architecture.md](docs/architecture.md).
@@ -166,6 +171,7 @@ GitHub Actions. Integration tests share one infrastructure, so each test package
 - The processor and aggregator health probes only prove the process answers on `/metrics`; they do not check
   Kafka or MongoDB connectivity.
 - The end-to-end check covers pageviews, clicks and bot events; per-session counters are not verified.
+- A late event joins the visitor's current session even if it belonged to an earlier one (no session merging).
 
 ## Progress
 

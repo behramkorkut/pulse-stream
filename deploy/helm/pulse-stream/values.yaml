@@ -38,7 +38,7 @@ infra:
       limits: { memory: 1536Mi }
   redis:
     image: redis:7-alpine
-    # Tout expire en 1 h, mais un run de chaos (~360 000 événements) occupe ~120 Mo pendant cette heure (sessions
+    # Tout expire en 90 min, mais un run de chaos (~360 000 événements) occupe ~120 Mo pendant ce temps (sessions
     # ~200 o et dédoublonnage ~150 o par événement) : 256 Mi ne tenaient pas deux runs. Redis sans disque : un
     # OOMKill effacerait sessions et doublons, d'où une marge large.
     resources:
