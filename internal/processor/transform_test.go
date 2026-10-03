@@ -128,6 +128,54 @@ func TestTransformRejections(t *testing.T) {
 	}
 }
 
+// rawReceived fabrique un événement brut tel que le collector le publie : avec son heure de réception.
+func rawReceived(id string, ts, receivedAt time.Time) []byte {
+	return []byte(`{"id":"` + id + `","type":"pageview","site_id":"site-42","visitor_id":"v-1",` +
+		`"url":"https://example.com/","user_agent":"` + chromeUA + `","timestamp":"` + ts.Format(time.RFC3339) + `",` +
+		`"received_at":"` + receivedAt.Format(time.RFC3339) + `"}`)
+}
+
+// Le retard maximal se mesure entre l'événement et sa RÉCEPTION, pas son traitement.
+func TestTransformLateness(t *testing.T) {
+	received := testNow.Add(-time.Minute)
+	cases := []struct {
+		name     string
+		raw      []byte
+		now      time.Time // heure du traitement
+		wantDead bool
+	}{
+		{"à l'heure", rawReceived("a", received.Add(-time.Second), received), testNow, false},
+		{"en retard, dans la limite", rawReceived("b", received.Add(-event.MaxLateness), received), testNow, false},
+		{"trop en retard", rawReceived("c", received.Add(-event.MaxLateness-time.Second), received), testNow, true},
+		// Arriéré dans Kafka : traité 3 h après sa réception, un événement arrivé à l'heure reste valide.
+		{"traité très tard mais reçu à l'heure", rawReceived("d", received.Add(-time.Second), received), testNow.Add(3 * time.Hour), false},
+		// Autre producteur, sans received_at : l'heure du traitement sert de référence.
+		{"sans heure de réception", rawEventAt("e", chromeUA, testNow.Add(-event.MaxLateness-time.Minute)), testNow, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := Source{Topic: "raw-events", Partition: 1, Offset: 7}
+			out := Transform(tc.raw, src, tc.now).encode(tc.raw, src, tc.now)
+			if out.Dead != tc.wantDead {
+				t.Fatalf("dead = %v, want %v (%s)", out.Dead, tc.wantDead, out.Value)
+			}
+			if !tc.wantDead {
+				return
+			}
+			var dl DeadLetter
+			if err := json.Unmarshal(out.Value, &dl); err != nil {
+				t.Fatalf("dead-letter illisible : %v", err)
+			}
+			if dl.Reason != ReasonTooLate || out.Reason != ReasonTooLate {
+				t.Errorf("reason = %q / %q, want %q", dl.Reason, out.Reason, ReasonTooLate)
+			}
+			if dl.Raw != string(tc.raw) || len(dl.Problems) == 0 {
+				t.Errorf("le rejet doit garder le message intact et dire pourquoi : %+v", dl)
+			}
+		})
+	}
+}
+
 func TestTransformTruncatesHugeRawInDeadLetter(t *testing.T) {
 	huge := []byte("{" + strings.Repeat("x", 100_000))
 

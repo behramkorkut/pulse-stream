@@ -2,6 +2,7 @@ package processor
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/behramkorkut/pulse-stream/internal/event"
@@ -12,6 +13,7 @@ const (
 	ReasonInvalidJSON  = "invalid_json"
 	ReasonInvalidEvent = "invalid_event"
 	ReasonEncodeError  = "encode_error"
+	ReasonTooLate      = "too_late" // reçu plus de event.MaxLateness après l'instant de l'événement
 )
 
 // maxRawBytes borne la taille du message d'origine recopié dans un rejet.
@@ -63,6 +65,14 @@ func Transform(raw []byte, src Source, now time.Time) Result {
 
 	if problems := e.Validate(now); len(problems) > 0 {
 		return Result{Dead: newDeadLetter(ReasonInvalidEvent, problems, raw, src, now)}
+	}
+
+	// Trop en retard : la mémoire des doublons et l'état des sessions ne couvrent plus cet événement. Il part en
+	// dead-letter, intact, plutôt que d'être compté deux fois ou rattaché à une mauvaise session ; un traitement
+	// par lots pourra le réintégrer.
+	if late := e.Lateness(now); late > event.MaxLateness {
+		problem := fmt.Sprintf("event is %s late, more than the allowed %s", late.Round(time.Second), event.MaxLateness)
+		return Result{Dead: newDeadLetter(ReasonTooLate, []string{problem}, raw, src, now)}
 	}
 
 	info := ParseUserAgent(e.UserAgent)

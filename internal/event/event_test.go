@@ -27,6 +27,7 @@ func TestValidate(t *testing.T) {
 	}{
 		{name: "événement valide", mutate: func(e *Event) {}},
 		{name: "click valide", mutate: func(e *Event) { e.Type = TypeClick }},
+		// Le collector accepte un événement ancien : le retard maximal est appliqué par le processor (voir Lateness).
 		{name: "ancien événement accepté", mutate: func(e *Event) { e.Timestamp = now.Add(-48 * time.Hour) }},
 		{name: "id manquant", mutate: func(e *Event) { e.ID = "" }, wantErr: "id is required"},
 		{name: "site manquant", mutate: func(e *Event) { e.SiteID = "" }, wantErr: "site_id is required"},
@@ -68,5 +69,21 @@ func TestValidateReportsAllProblems(t *testing.T) {
 	// id, site_id, visitor_id, type, url, timestamp
 	if len(problems) != 6 {
 		t.Fatalf("len(problems) = %d (%v), want 6", len(problems), problems)
+	}
+}
+
+func TestLatenessIsMeasuredFromReception(t *testing.T) {
+	e := validEvent()
+	e.Timestamp = now.Add(-10 * time.Minute)
+	e.ReceivedAt = now.Add(-9 * time.Minute)
+
+	// Traité 3 h plus tard (arriéré dans Kafka) : le retard reste celui constaté à la réception.
+	if got := e.Lateness(now.Add(3 * time.Hour)); got != time.Minute {
+		t.Errorf("Lateness = %v, want 1m (réception - événement)", got)
+	}
+
+	e.ReceivedAt = time.Time{} // autre producteur : pas d'heure de réception
+	if got := e.Lateness(now); got != 10*time.Minute {
+		t.Errorf("Lateness sans réception = %v, want 10m (référence fournie - événement)", got)
 	}
 }

@@ -72,8 +72,9 @@ type Redis struct {
 	ttl     time.Duration
 }
 
-// NewRedis crée un Store Redis. La clé d'un visiteur expire après deux fois le délai d'inactivité :
-// passé ce délai, la clé ne pourrait de toute façon plus rattacher aucun événement en temps réel.
+// NewRedis crée un Store Redis. La clé d'un visiteur expire après le délai d'inactivité plus le retard
+// maximal toléré (event.MaxLateness) : un événement encore accepté peut retrouver la session à laquelle il
+// appartient ; plus en retard, il part en dead-letter et n'a plus besoin de cet état.
 // Le résultat mémorisé de chaque événement a la même durée de vie : c'est la fenêtre dans laquelle un
 // rejeu redonne exactement le même résultat. Coût : une clé par événement humain pendant cette durée.
 func NewRedis(client redis.Scripter, timeout time.Duration) *Redis {
@@ -84,7 +85,7 @@ func NewRedis(client redis.Scripter, timeout time.Duration) *Redis {
 		client:  client,
 		script:  redis.NewScript(touchScript),
 		timeout: timeout,
-		ttl:     2 * timeout,
+		ttl:     timeout + event.MaxLateness,
 	}
 }
 

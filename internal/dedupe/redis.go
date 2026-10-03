@@ -11,14 +11,6 @@ import (
 
 const keyPrefix = "pulse:seen:"
 
-// DefaultTTL est la durée pendant laquelle un identifiant reste mémorisé.
-//
-// Limite assumée : la mémoire nécessaire croît avec le débit x la durée. À des centaines de milliers
-// d'événements par seconde, une fenêtre d'une heure ne tiendrait pas dans un Redis : on utiliserait
-// alors une fenêtre plus courte, un filtre de Bloom, ou un état local par partition. Ici, l'objectif est
-// de montrer le mécanisme.
-const DefaultTTL = time.Hour
-
 // redisKey construit la clé Redis d'un événement : pulse:seen:<longueur du site>:<site>:<identifiant>.
 // La longueur rend la clé sans ambiguïté quel que soit le contenu du site : avec un simple séparateur,
 // ("a:b", "c") et ("a", "b:c") donneraient la même clé. Elle reste lisible dans redis-cli.

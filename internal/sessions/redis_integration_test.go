@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/behramkorkut/pulse-stream/internal/event"
 )
 
 // testClient se connecte à la base 14, réservée à ce paquet.
@@ -69,8 +71,8 @@ func TestRedisStoreKeysExpire(t *testing.T) {
 		if err != nil {
 			t.Fatalf("TTL %s : %v", k, err)
 		}
-		if ttl <= 0 || ttl > 2*DefaultTimeout {
-			t.Errorf("clé %s : durée de vie %v, want entre 0 et %v", k, ttl, 2*DefaultTimeout)
+		if limit := DefaultTimeout + event.MaxLateness; ttl <= 0 || ttl > limit {
+			t.Errorf("clé %s : durée de vie %v, want entre 0 et %v", k, ttl, limit)
 		}
 	}
 }

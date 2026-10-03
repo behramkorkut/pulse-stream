@@ -14,10 +14,19 @@ const (
 )
 
 const (
-	maxFieldLen   = 128
-	maxURLLen     = 2048
-	maxFutureSkew = 5 * time.Minute
+	maxFieldLen = 128
+	maxURLLen   = 2048
 )
+
+// MaxFutureSkew est l'avance tolérée sur l'horloge du serveur. Au-delà, l'horloge du client est fausse (ou il
+// triche) : l'événement est refusé.
+const MaxFutureSkew = 5 * time.Minute
+
+// MaxLateness est le retard maximal toléré entre l'instant d'un événement et sa réception par le collector
+// (« allowed lateness »). Le collector accepte les événements plus anciens, mais le processor les envoie en
+// dead-letter (raison too_late) : au-delà, la mémoire des doublons et l'état des sessions ne les couvrent plus.
+// Les durées de vie de ces deux mémoires sont calculées à partir de cette valeur.
+const MaxLateness = time.Hour
 
 // Event est un événement émis par un navigateur (ou notre générateur de charge).
 //
@@ -60,16 +69,27 @@ func (e Event) Validate(now time.Time) []string {
 		}
 	}
 
-	// Les événements anciens sont acceptés (un mobile peut envoyer en différé),
-	// mais un événement "du futur" indique une horloge cassée ou une tentative de triche.
+	// Les événements anciens sont acceptés ici (un mobile peut envoyer en différé) : c'est le processor qui
+	// applique MaxLateness, mesuré depuis la réception. Un événement "du futur" indique en revanche une horloge
+	// cassée ou une tentative de triche.
 	switch {
 	case e.Timestamp.IsZero():
 		problems = append(problems, "timestamp is required")
-	case e.Timestamp.After(now.Add(maxFutureSkew)):
+	case e.Timestamp.After(now.Add(MaxFutureSkew)):
 		problems = append(problems, "timestamp is in the future")
 	}
 
 	return problems
+}
+
+// Lateness est le retard de l'événement à sa réception par le collector (ReceivedAt - Timestamp). Le mesurer
+// depuis l'heure du TRAITEMENT serait faux : un arriéré dans Kafka rendrait « trop vieux » des événements arrivés
+// à l'heure. Sans heure de réception (événement publié par un autre producteur), ref la remplace.
+func (e Event) Lateness(ref time.Time) time.Duration {
+	if !e.ReceivedAt.IsZero() {
+		ref = e.ReceivedAt
+	}
+	return ref.Sub(e.Timestamp)
 }
 
 func required(field, value string, maxLen int) []string {

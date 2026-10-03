@@ -6,7 +6,27 @@
 // seront recomptés (doublon) plutôt que perdus. Marquer avant risquerait l'inverse.
 package dedupe
 
-import "context"
+import (
+	"context"
+	"time"
+
+	"github.com/behramkorkut/pulse-stream/internal/event"
+)
+
+// MinTTL est la durée minimale de mémorisation d'un événement compté : le retard maximal toléré plus l'avance
+// d'horloge tolérée. Un client peut renvoyer un événement tant qu'il n'est pas trop en retard (au-delà, le
+// processor le met en dead-letter) : en dessous de cette durée, un tel renvoi ne serait plus reconnu et serait
+// compté une seconde fois.
+const MinTTL = event.MaxLateness + event.MaxFutureSkew
+
+// DefaultTTL est la durée pendant laquelle un événement compté reste mémorisé : MinTTL (65 min) plus 25 min de
+// marge pour un retard de traitement.
+//
+// Limite assumée : la mémoire nécessaire croît avec le débit x la durée. À des centaines de milliers
+// d'événements par seconde, une telle fenêtre ne tiendrait pas dans un Redis : on utiliserait alors un retard
+// toléré plus court, un filtre de Bloom, ou un état local par partition. Ici, l'objectif est de montrer le
+// mécanisme.
+const DefaultTTL = 90 * time.Minute
 
 // Key identifie un événement pour le dédoublonnage : son site ET son identifiant.
 //

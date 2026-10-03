@@ -8,7 +8,7 @@ import (
 // Metrics mesure ce que le processor fait des messages. Un *Metrics nil est valide (no-op).
 type Metrics struct {
 	events      *prometheus.CounterVec // messages écrits, par destination (enriched | dead_letter)
-	deadLetters *prometheus.CounterVec // rejets, par raison (invalid_json, invalid_event, encode_error)
+	deadLetters *prometheus.CounterVec // rejets, par raison (invalid_json, invalid_event, encode_error, too_late)
 }
 
 // NewMetrics déclare les métriques du processor dans reg (nil : déclarées mais non publiées).
@@ -28,7 +28,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	// Séries créées à zéro dès le départ (voir batch.NewMetrics : "No data" et première incrémentation perdue).
 	m.events.WithLabelValues("enriched")
 	m.events.WithLabelValues("dead_letter")
-	for _, reason := range []string{ReasonInvalidJSON, ReasonInvalidEvent, ReasonEncodeError} {
+	for _, reason := range []string{ReasonInvalidJSON, ReasonInvalidEvent, ReasonEncodeError, ReasonTooLate} {
 		m.deadLetters.WithLabelValues(reason)
 	}
 	return m

@@ -57,9 +57,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	dedupeTTLMin, err := envInt("DEDUPE_TTL_MIN", 60)
+	dedupeTTLMin, err := envInt("DEDUPE_TTL_MIN", int(dedupe.DefaultTTL/time.Minute))
 	if err != nil {
 		return err
+	}
+	dedupeTTL := time.Duration(dedupeTTLMin) * time.Minute
+	if dedupeTTL < dedupe.MinTTL {
+		return fmt.Errorf("DEDUPE_TTL_MIN=%d est trop court : au moins %s (retard maximal toléré + avance d'horloge tolérée)",
+			dedupeTTLMin, dedupe.MinTTL)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -119,7 +124,7 @@ func run() error {
 	defer stopMetrics()
 
 	runner := aggregator.NewRunner(reader, store,
-		dedupe.NewRedis(rdb, time.Duration(dedupeTTLMin)*time.Minute),
+		dedupe.NewRedis(rdb, dedupeTTL),
 		aggregator.Config{
 			BatchSize:    batchSize,
 			BatchWait:    time.Duration(batchWaitMs) * time.Millisecond,
@@ -132,7 +137,7 @@ func run() error {
 		slog.String("group", groupID),
 		slog.String("from", topic),
 		slog.String("mongo", mongoDB+"."+mongoColl),
-		slog.String("dedupe_ttl", (time.Duration(dedupeTTLMin)*time.Minute).String()),
+		slog.String("dedupe_ttl", dedupeTTL.String()),
 	)
 
 	if err := runner.Run(ctx); err != nil {
