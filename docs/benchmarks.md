@@ -104,6 +104,36 @@ Lecture :
 - Dans les trois runs, la vérification de bout en bout est exacte : aucun événement perdu, aucun double comptage, y
   compris pendant les réattributions de partitions quand on a ajouté un processor.
 
+## Résultat 4 : la fraîcheur de bout en bout
+
+Mesurée le 3 octobre 2026, après l'ajout de la métrique `pulse_end_to_end_latency_seconds` : temps entre la réception
+d'un événement par le collector et l'écriture de ses compteurs dans MongoDB. Un processor, un aggregator, mélange par
+défaut (événements en retard compris), `make load RATES=1000,4000 DURATION=30s`, vérification de bout en bout exacte.
+
+| Palier | p50 | p99 |
+|---|---:|---:|
+| 4 000 événements/s (30 dernières secondes du palier) | ≈ 125 ms | ≈ 320 ms |
+
+Requête Prometheus (le run commence à l'instant Unix 1791018761, le palier à 4 000/s finit vers 1791018826) :
+
+```
+histogram_quantile(0.99, sum by (le) (increase(pulse_end_to_end_latency_seconds_bucket[30s] @ 1791018830)))
+```
+
+Lecture :
+
+- Un événement devient visible en un peu plus d'un dixième de seconde dans la moitié des cas. L'essentiel de ce temps
+  vient du traitement par lots : chaque consommateur attend jusqu'à 50 ms pour remplir un lot, puis le traite (au p99,
+  environ 100 ms pour un lot du processor à ce débit), et chaque écriture dans Kafka attend jusqu'à 10 ms d'être
+  regroupée. C'est le prix du débit : des lots plus petits ou plus courts réduiraient la fraîcheur, au prix de plus
+  d'allers-retours réseau.
+- Ce sont des **estimations** : l'histogramme range les mesures dans des tranches qui doublent (80-160 ms, 160-320 ms…)
+  et `histogram_quantile` interpole à l'intérieur. Les chiffres disent « entre 80 et 160 ms » pour le p50 et « entre
+  160 et 320 ms, plutôt vers le haut » pour le p99, pas plus précisément.
+- Contre-exemple utile : quand l'aggregator est arrêté puis relancé, la même métrique monte à 4-5 minutes, le temps
+  passé par les événements à attendre dans Kafka. Le retard en messages ne donnait pas cette information.
+- Une seule mesure, sur un seul Mac partagé avec le générateur : un ordre de grandeur, pas une garantie.
+
 ## Limites de ces mesures
 
 - **Une seule machine**, partagée avec le générateur ; **une mesure par configuration** (pas de médiane sur plusieurs

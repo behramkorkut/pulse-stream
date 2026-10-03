@@ -121,6 +121,7 @@ configurations do.
 | One processor alone | ~6,000 events/s; the surplus waits in Kafka (max 291,000 behind) and drains |
 | 1 / 2 / 3 processors | 5,200 / 8,200 / 9,500 events/s end to end |
 | End-to-end check | exact in every benchmark run |
+| Freshness at 4,000 events/s (reception → counters in MongoDB) | p50 ≈ 125 ms, p99 ≈ 320 ms |
 
 ## Failure behaviour, briefly
 
