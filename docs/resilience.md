@@ -130,8 +130,11 @@ avec la nouvelle (commandes ci-dessous) avant d'affirmer « aucun double comptag
 ## Reproduire
 
 ```bash
-make kind-up && make docker-build && make kind-load
+make kind-up                          # une fois
+make docker-build kind-load           # après chaque changement de code
 make helm-install HELM_ARGS="--set apps.processor.replicas=3 --set apps.aggregator.replicas=3"
+# Les images gardent le tag latest : un pod dont la spécification n'a pas changé ne redémarre pas tout seul.
+kubectl rollout restart --namespace pulse deployment/collector deployment/processor deployment/aggregator
 
 make k8s-chaos APP=aggregator MODE=crash KILLS=6 INTERVAL=20 RATES=2500 DURATION=150s
 make k8s-chaos APP=aggregator MODE=graceful KILLS=6 INTERVAL=20 RATES=2500 DURATION=150s

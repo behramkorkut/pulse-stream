@@ -143,6 +143,9 @@ Limites et coûts, à documenter honnêtement :
 - **Les positions supposent que les topics ne sont pas recréés.** Si `enriched-events` est supprimé puis recréé
   (offsets repartant de 0) alors que MongoDB garde ses positions, les nouveaux messages seraient pris pour des
   rejeux et ignorés. Repartir de zéro des deux côtés (`docker compose down -v`), ou vider `kafka_positions`.
+- **Coût de la transaction** : en local, à 1 000 événements/s, la latence d'écriture MongoDB passe d'environ 1 ms
+  (p50, `$inc` seul) à environ 7 ms (p50, p99 entre 15 et 40 ms), mesuré sur le dashboard ; la fraîcheur de bout en
+  bout reste du même ordre (p50 ≈ 120 ms, p99 ≈ 300 ms), dominée par l'attente des lots.
 - **Contention entre aggregators** : les documents (site, minute) sont partagés. Deux transactions qui incrémentent le
   même document en même temps entrent en conflit, et l'une est rejouée. Correct, mais plus lent à plusieurs
   instances sur peu de sites. Piste : un document par (site, minute, partition), écrit par un seul propriétaire, et

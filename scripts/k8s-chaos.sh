@@ -30,6 +30,23 @@ NODE="${KIND_NODE:-${KIND_CLUSTER:-pulse}-control-plane}"   # le conteneur Docke
 
 case "$MODE" in graceful | crash) ;; *) echo "mode inconnu : $MODE (graceful ou crash)" >&2; exit 2 ;; esac
 
+# Garde-fou : le cluster doit faire tourner le code local. Un run de panne sur des images périmées mesure l'ancienne
+# version. C'est arrivé : un processor sans la règle too_late comptait les événements trop en retard, et l'écart
+# (+1 832) ressemblait à du double comptage. Chaque programme écrit sa version dans son journal au démarrage.
+expected="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+stale=""
+for app in collector processor aggregator; do
+  running="$(kubectl logs --namespace "$NS" "deployment/$app" 2>/dev/null | grep -o '"version":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+  [ "$running" = "$expected" ] || stale="$stale $app=${running:-inconnue}"
+done
+if [ -n "$stale" ] && [ "${ALLOW_STALE:-0}" != 1 ]; then
+  echo "Le cluster ne fait pas tourner le code local ($expected) :$stale" >&2
+  echo "Mettre à jour : make docker-build kind-load, make helm-install HELM_ARGS=\"...\", puis" >&2
+  echo "  kubectl rollout restart --namespace $NS deployment/collector deployment/processor deployment/aggregator" >&2
+  echo "Pour lancer quand même : ALLOW_STALE=1 make k8s-chaos ..." >&2
+  exit 3
+fi
+
 # Un tunnel vers le MongoDB du cluster, le temps du test.
 kubectl port-forward --namespace "$NS" mongo-0 27018:27017 >/dev/null 2>&1 &
 PF=$!
