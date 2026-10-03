@@ -3,6 +3,7 @@ package dedupe
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -18,7 +19,14 @@ const keyPrefix = "pulse:seen:"
 // de montrer le mécanisme.
 const DefaultTTL = time.Hour
 
-// Redis est un Store adossé à Redis : une clé par identifiant, qui expire seule.
+// redisKey construit la clé Redis d'un événement : pulse:seen:<longueur du site>:<site>:<identifiant>.
+// La longueur rend la clé sans ambiguïté quel que soit le contenu du site : avec un simple séparateur,
+// ("a:b", "c") et ("a", "b:c") donneraient la même clé. Elle reste lisible dans redis-cli.
+func redisKey(k Key) string {
+	return keyPrefix + strconv.Itoa(len(k.SiteID)) + ":" + k.SiteID + ":" + k.EventID
+}
+
+// Redis est un Store adossé à Redis : une clé par événement, qui expire seule.
 type Redis struct {
 	client redis.Cmdable
 	ttl    time.Duration
@@ -33,25 +41,25 @@ func NewRedis(client redis.Cmdable, ttl time.Duration) *Redis {
 }
 
 // Seen implémente Store avec un seul aller-retour (MGET) pour tout le lot.
-func (r *Redis) Seen(ctx context.Context, ids []string) ([]bool, error) {
-	if len(ids) == 0 {
+func (r *Redis) Seen(ctx context.Context, keys []Key) ([]bool, error) {
+	if len(keys) == 0 {
 		return nil, nil
 	}
 
-	keys := make([]string, len(ids))
-	for i, id := range ids {
-		keys[i] = keyPrefix + id
+	names := make([]string, len(keys))
+	for i, k := range keys {
+		names[i] = redisKey(k)
 	}
 
-	values, err := r.client.MGet(ctx, keys...).Result()
+	values, err := r.client.MGet(ctx, names...).Result()
 	if err != nil {
 		return nil, fmt.Errorf("redis mget: %w", err)
 	}
-	if len(values) != len(ids) {
-		return nil, fmt.Errorf("redis mget: %d values for %d keys", len(values), len(ids))
+	if len(values) != len(keys) {
+		return nil, fmt.Errorf("redis mget: %d values for %d keys", len(values), len(keys))
 	}
 
-	seen := make([]bool, len(ids))
+	seen := make([]bool, len(keys))
 	for i, v := range values {
 		seen[i] = v != nil // une clé absente est retournée comme nil
 	}
@@ -59,14 +67,14 @@ func (r *Redis) Seen(ctx context.Context, ids []string) ([]bool, error) {
 }
 
 // Mark implémente Store avec un seul aller-retour (pipeline) pour tout le lot.
-func (r *Redis) Mark(ctx context.Context, ids []string) error {
-	if len(ids) == 0 {
+func (r *Redis) Mark(ctx context.Context, keys []Key) error {
+	if len(keys) == 0 {
 		return nil
 	}
 
 	pipe := r.client.Pipeline()
-	for _, id := range ids {
-		pipe.Set(ctx, keyPrefix+id, 1, r.ttl)
+	for _, k := range keys {
+		pipe.Set(ctx, redisKey(k), 1, r.ttl)
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("redis pipeline set: %w", err)

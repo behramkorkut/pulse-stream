@@ -38,7 +38,7 @@ load generator ──HTTP──▶ collector ──▶ Kafka/Redpanda [raw-event
                          Kafka [enriched-events] + [dead-letter]
                                               │
                     aggregator (consumer group) ──▶ MongoDB (counters per minute)
-                         │ dedupe by event id (Redis)
+                         │ dedupe by site + event id (Redis)
                          ▼
         /metrics (every program) ──▶ Prometheus ──▶ Grafana
 ```

@@ -121,17 +121,17 @@ type recordingSeen struct {
 	marks   int
 }
 
-func (r *recordingSeen) Seen(ctx context.Context, ids []string) ([]bool, error) {
+func (r *recordingSeen) Seen(ctx context.Context, keys []dedupe.Key) ([]bool, error) {
 	if r.failSee {
 		return nil, errors.New("redis indisponible")
 	}
-	return r.Store.Seen(ctx, ids)
+	return r.Store.Seen(ctx, keys)
 }
 
-func (r *recordingSeen) Mark(ctx context.Context, ids []string) error {
+func (r *recordingSeen) Mark(ctx context.Context, keys []dedupe.Key) error {
 	r.marks++
 	r.log.add("mark")
-	return r.Store.Mark(ctx, ids)
+	return r.Store.Mark(ctx, keys)
 }
 
 func msgFor(t *testing.T, offset int64, e event.Enriched) kafka.Message {
@@ -253,6 +253,28 @@ func TestRunnerCountsADuplicatedEventOnlyOnce(t *testing.T) {
 	}
 }
 
+// Régression : l'identifiant vient du client et n'est unique qu'au sein d'un site. Le même identifiant envoyé par
+// plusieurs sites désigne des événements différents : tous doivent être comptés, dans un même lot (dédoublonnage
+// interne au lot) comme dans des lots différents (mémoire des doublons dans Redis).
+func TestRunnerCountsTheSameIDOnDifferentSites(t *testing.T) {
+	cfg := testConfig()
+	cfg.BatchSize = 2 // lot 1 : e1 de site-a et e1 de site-b ; lot 2 : e1 de site-c
+	r := newRig([]kafka.Message{
+		msgFor(t, 0, human("e1", "site-a", event.TypePageview, "desktop", "chrome", 0, true)),
+		msgFor(t, 1, human("e1", "site-b", event.TypePageview, "desktop", "chrome", 0, true)),
+		msgFor(t, 2, human("e1", "site-c", event.TypePageview, "desktop", "chrome", 0, true)),
+	}, cfg)
+	stop := r.start(t)
+
+	waitFor(t, "les 3 offsets validés", func() bool { return r.src.committed() == 3 })
+	if err := stop(); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if pv, _, _, _ := r.store.totals(); pv != 3 {
+		t.Errorf("pageviews = %d, want 3 : un même identifiant sur trois sites, ce sont trois événements", pv)
+	}
+}
+
 func TestRunnerSkipsPoisonMessagesButStillCommitsThem(t *testing.T) {
 	msgs := []kafka.Message{
 		{Topic: "enriched-events", Offset: 0, Value: []byte(`{oops`)},
@@ -361,7 +383,7 @@ func TestMetricsSeriesExistAtZeroFromTheStart(t *testing.T) {
 // processus s'arrête avant d'avoir mémorisé les identifiants (et donc avant de valider les offsets).
 type failingMark struct{ dedupe.Store }
 
-func (failingMark) Mark(context.Context, []string) error {
+func (failingMark) Mark(context.Context, []dedupe.Key) error {
 	return errors.New("arrêt simulé entre Apply et Mark")
 }
 

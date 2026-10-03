@@ -60,15 +60,15 @@ func (r *Runner) handle(ctx context.Context, msgs []kafka.Message) error {
 
 	events, skipped, batchDuplicates := r.decode(msgs)
 
-	ids := make([]string, len(events))
+	keys := make([]dedupe.Key, len(events))
 	for i, e := range events {
-		ids[i] = e.ID
+		keys[i] = dedupeKey(e)
 	}
 
 	var seen []bool
-	if len(ids) > 0 {
+	if len(keys) > 0 {
 		err := retry.Do(ctx, r.log, "check seen ids", func() (err error) {
-			seen, err = r.seen.Seen(ctx, ids)
+			seen, err = r.seen.Seen(ctx, keys)
 			return err
 		})
 		if err != nil {
@@ -77,11 +77,11 @@ func (r *Runner) handle(ctx context.Context, msgs []kafka.Message) error {
 	}
 
 	var fresh []event.Enriched
-	var freshIDs []string
+	var freshKeys []dedupe.Key
 	for i, e := range events {
 		if !seen[i] {
 			fresh = append(fresh, e)
-			freshIDs = append(freshIDs, e.ID)
+			freshKeys = append(freshKeys, keys[i])
 		}
 	}
 	duplicates := batchDuplicates + len(events) - len(fresh)
@@ -96,7 +96,7 @@ func (r *Runner) handle(ctx context.Context, msgs []kafka.Message) error {
 		if err := retry.Do(ctx, r.log, "apply counters", applyOnce); err != nil {
 			return fmt.Errorf("apply counters: %w", err)
 		}
-		if err := retry.Do(ctx, r.log, "mark counted ids", func() error { return r.seen.Mark(ctx, freshIDs) }); err != nil {
+		if err := retry.Do(ctx, r.log, "mark counted ids", func() error { return r.seen.Mark(ctx, freshKeys) }); err != nil {
 			return fmt.Errorf("mark counted ids: %w", err)
 		}
 	}
@@ -116,9 +116,10 @@ func (r *Runner) handle(ctx context.Context, msgs []kafka.Message) error {
 
 // decode transforme les messages en événements. Un message inexploitable est écarté et journalisé, mais
 // n'arrête jamais le flux : il sera validé avec le reste du lot. Ce serait sinon un "message poison" qui
-// bloquerait l'aggregator pour toujours. Les doublons à l'intérieur du lot sont écartés (le premier gagne).
+// bloquerait l'aggregator pour toujours. Les doublons à l'intérieur du lot (même site, même identifiant) sont
+// écartés (le premier gagne).
 func (r *Runner) decode(msgs []kafka.Message) (events []event.Enriched, skipped, duplicates int) {
-	inBatch := make(map[string]bool, len(msgs))
+	inBatch := make(map[dedupe.Key]bool, len(msgs))
 
 	for _, m := range msgs {
 		e, err := Decode(m.Value)
@@ -129,12 +130,19 @@ func (r *Runner) decode(msgs []kafka.Message) (events []event.Enriched, skipped,
 				slog.Int64("offset", m.Offset), slog.Any("error", err))
 			continue
 		}
-		if inBatch[e.ID] {
+		k := dedupeKey(e)
+		if inBatch[k] {
 			duplicates++
 			continue
 		}
-		inBatch[e.ID] = true
+		inBatch[k] = true
 		events = append(events, e)
 	}
 	return events, skipped, duplicates
+}
+
+// dedupeKey identifie un événement pour le dédoublonnage. L'identifiant vient du client et n'est unique qu'au sein
+// d'un site : le site fait partie de la clé, sinon le même identifiant envoyé par deux sites ne serait compté qu'une fois.
+func dedupeKey(e event.Enriched) dedupe.Key {
+	return dedupe.Key{SiteID: e.SiteID, EventID: e.ID}
 }

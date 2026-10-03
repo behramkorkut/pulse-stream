@@ -67,7 +67,7 @@ chemins y mènent : un crash du processor avant l'écriture du lot, et le nouvel
 Redis échoue. Aucun test ne le voyait : le générateur de charge date tous les événements de l'instant présent. Le
 script mémorise désormais le résultat de chaque événement (clé `pulse:session-result:<empreinte>`, même durée de vie
 que l'état du visiteur) et le renvoie tel quel au rejeu. Coût mesuré sur Redis 7 : environ 200 octets par événement
-humain pendant 60 min, en plus des quelque 120 octets du dédoublonnage. Tests de régression :
+humain pendant 60 min, en plus des quelque 150 octets du dédoublonnage. Tests de régression :
 `TestRunnerRetryKeepsSessionsAcrossABoundary` et le cas de contrat « rejouer un lot qui franchit une coupure ».
 
 ## Aggregator : dédoublonner, compter, écrire
@@ -76,8 +76,9 @@ L'aggregator lit `enriched-events` (groupe `pulse-aggregator`) et maintient, dan
 site et par minute (`_id = site|2026-09-30T11:00Z`) avec les compteurs `pageviews`, `clicks`, `bot_events`,
 `sessions` et les répartitions `devices.*` / `browsers.*`. Chaque lot suit cet ordre précis :
 
-1. décoder (un message inexploitable est écarté et journalisé, jamais bloquant) et écarter les doublons du lot ;
-2. demander à Redis quels identifiants ont déjà été comptés (`MGET`) et les écarter ;
+1. décoder (un message inexploitable est écarté et journalisé, jamais bloquant) et écarter les doublons du lot
+   (même site, même identifiant) ;
+2. demander à Redis quels événements (site et identifiant) ont déjà été comptés (`MGET`) et les écarter ;
 3. cumuler les compteurs dans MongoDB (un seul `BulkWrite` d'upserts avec `$inc`) ;
 4. **seulement alors**, mémoriser les identifiants comptés dans Redis (`SET ... EX`, TTL d'une heure) ;
 5. puis valider les offsets Kafka.
@@ -90,6 +91,18 @@ perdus. Entre deux maux, on choisit le doublon rare plutôt que la perte silenci
 Le temps utilisé est celui de l'**événement** : un événement en retard tombe dans la bonne minute. Les robots
 n'alimentent que `bot_events`. Les clés des répartitions sont filtrées sur une liste blanche (sinon `other`) :
 le contenu du topic ne doit jamais devenir un nom de champ MongoDB.
+
+**Correction : le dédoublonnage n'était pas séparé par site.** L'identifiant d'un événement est fourni par le client :
+il n'est unique qu'au sein d'un site. La première version ne gardait que lui, dans le lot comme dans Redis
+(`pulse:seen:<id>`). Si deux sites envoyaient le même identifiant (compteur local, SDK mal configuré, ou volontairement
+pour effacer le trafic d'un autre site), l'événement du second était écarté comme doublon, sans aucun signal. La clé
+est désormais le couple (site, identifiant), stocké sous la forme `pulse:seen:<longueur du site>:<site>:<identifiant>` :
+la longueur empêche que (`a:b`, `c`) et (`a`, `b:c`) se confondent, et la clé reste lisible dans `redis-cli`. Exiger un
+UUID au collector a été écarté : cela casserait les clients existants et ne protégerait pas d'un client qui reprend
+volontairement l'identifiant d'un autre site. Coût mesuré sur Redis 7 avec les identifiants du générateur de charge :
+149 octets par événement au lieu de 134. Au déploiement, les clés de l'ancien format ne sont plus lues : un lot déjà
+compté puis rejoué dans l'heure qui suit (crash, rééquilibrage) serait recompté une fois. Tests de régression :
+`TestRunnerCountsTheSameIDOnDifferentSites` et deux nouveaux cas de contrat dans le paquet `dedupe`.
 
 Limites assumées, à documenter honnêtement :
 

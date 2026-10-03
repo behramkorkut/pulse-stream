@@ -8,11 +8,21 @@ package dedupe
 
 import "context"
 
-// Store mémorise des identifiants d'événements.
-type Store interface {
-	// Seen indique, pour chaque identifiant (dans le même ordre), s'il a déjà été marqué.
-	Seen(ctx context.Context, ids []string) ([]bool, error)
+// Key identifie un événement pour le dédoublonnage : son site ET son identifiant.
+//
+// L'identifiant est fourni par le client : il n'est unique qu'au sein d'un site. Deux sites peuvent envoyer le
+// même (compteur local, SDK mal configuré, ou volontairement pour effacer le trafic d'un autre site). Avec
+// l'identifiant seul, l'événement du second site serait écarté comme doublon, sans aucun signal.
+type Key struct {
+	SiteID  string
+	EventID string
+}
 
-	// Mark mémorise des identifiants. Marquer deux fois le même identifiant est sans effet.
-	Mark(ctx context.Context, ids []string) error
+// Store mémorise des événements déjà comptés.
+type Store interface {
+	// Seen indique, pour chaque clé (dans le même ordre), si elle a déjà été marquée.
+	Seen(ctx context.Context, keys []Key) ([]bool, error)
+
+	// Mark mémorise des clés. Marquer deux fois la même clé est sans effet.
+	Mark(ctx context.Context, keys []Key) error
 }

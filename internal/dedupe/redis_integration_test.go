@@ -50,11 +50,12 @@ func TestRedisStoreKeysExpire(t *testing.T) {
 	}
 
 	store := NewRedis(client, 90*time.Second)
-	if err := store.Mark(ctx, []string{"evt-ttl"}); err != nil {
+	key := Key{SiteID: "site-ttl", EventID: "evt-ttl"}
+	if err := store.Mark(ctx, []Key{key}); err != nil {
 		t.Fatalf("Mark() error = %v", err)
 	}
 
-	ttl, err := client.TTL(ctx, keyPrefix+"evt-ttl").Result()
+	ttl, err := client.TTL(ctx, redisKey(key)).Result()
 	if err != nil {
 		t.Fatalf("TTL : %v", err)
 	}
