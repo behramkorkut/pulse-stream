@@ -7,6 +7,9 @@
 # Tous les instants restent dans l'heure écoulée : au-delà du retard maximal toléré (1 h), le processor
 # enverrait ces événements en dead-letter (raison too_late).
 #
+# Le script relit ensuite le topic enriched-events (les 2 dernières minutes seulement) et affiche les sessions
+# attribuées : pas besoin de parcourir tout le topic à la main.
+#
 # Prérequis : make up, make topics, collector et processor lancés (make run-collector / run-processor).
 # Usage : bash scripts/sessions-demo.sh [adresse du collector]
 
@@ -36,8 +39,19 @@ send 3 18 panier
 send 4 53 accueil
 send 5 56 merci
 
+# recent <topic> : les messages des 2 dernières minutes, puis arrêt (@-2m:end), au lieu de tout le topic.
+recent() { docker compose exec -T redpanda rpk topic consume "$1" -o @-2m:end -f '%v\n' 2>/dev/null || true; }
+
 echo
-echo "Pour voir les sessions attribuées, lance (Ctrl+C pour quitter) :"
-echo "  make consume TOPIC=enriched-events | grep $visitor"
-echo "Cherche session_id (identique pour les événements 1 à 3, différent pour 4 et 5) et new_session."
-echo "Et l'état dans Redis : make sessions"
+echo "Attente du traitement par le processor (3 s)..."
+sleep 3
+
+echo "Sessions attribuées (topic enriched-events). Attendu : une session pour 1 à 3, une autre pour 4 et 5,"
+echo "new_session=true sur 1 et 4 seulement :"
+recent enriched-events | grep "\"visitor_id\":\"$visitor\"" |
+  sed -E 's/.*"id":"[^"]*-([0-9]+)".*"timestamp":"([^"]*)".*"session_id":"([^"]*)","new_session":(true|false).*/  événement \1  \2  \3  new_session=\4/' || true
+
+rejected="$(recent dead-letter | grep -c "$visitor" || true)"
+echo "Rejetés dans dead-letter : $rejected (attendu : 0)"
+echo
+echo "État du visiteur dans Redis : make sessions"

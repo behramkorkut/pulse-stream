@@ -3,6 +3,7 @@
 MODULE  := github.com/behramkorkut/pulse-stream
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 TOPIC   ?= raw-events
+OFFSET  ?= start
 RATES    ?= 200,500,1000
 DURATION ?= 20s
 WORKERS  ?= 128
@@ -99,8 +100,8 @@ dashboard: ## Ouvre le dashboard Grafana dans le navigateur (macOS)
 topics: ## Cree les topics Kafka (infrastructure demarree)
 	bash scripts/create-topics.sh
 
-consume: ## Lit un topic : make consume TOPIC=enriched-events (Ctrl+C pour quitter)
-	docker compose exec redpanda rpk topic consume $(TOPIC) -o start -f 'partition=%p offset=%o key=%k value=%v\n'
+consume: ## Lit un topic : make consume TOPIC=enriched-events [OFFSET=@-5m:end pour les 5 dernières minutes seulement]
+	docker compose exec redpanda rpk topic consume $(TOPIC) -o $(OFFSET) -f 'partition=%p offset=%o key=%k value=%v\n'
 
 group: ## Membres, partitions assignees et retard du groupe pulse-processor
 	docker compose exec redpanda rpk group describe pulse-processor
