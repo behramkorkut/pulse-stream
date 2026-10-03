@@ -21,8 +21,9 @@ or on Kubernetes (kind + Helm), is observable with Prometheus and Grafana, and i
   run, and exits non-zero on any difference.
 - **Failure testing with honest results.** 9 recorded runs killing processors and aggregators under load (SIGKILL
   included): **no event lost** in any run; a rare **over-count** (up to 0.013 %) in 2 runs, traced to the
-  non-atomic duplicate check between instances during a rebalance. Everything, including my own wrong assumptions,
-  is in [docs/resilience.md](docs/resilience.md) and [docs/postmortem.md](docs/postmortem.md).
+  non-atomic duplicate check between instances during a rebalance, **then fixed** with an idempotent write (failure
+  runs to be repeated). Everything, including my own wrong assumptions, is in [docs/resilience.md](docs/resilience.md)
+  and [docs/postmortem.md](docs/postmortem.md).
 - **A production-style delivery chain.** Static distroless non-root images (19.6–35.4 MB), a Helm chart with
   probes, resource limits and a strict `securityContext`, Prometheus pod discovery, and a CI job that deploys
   the whole thing on a throwaway kind cluster and checks the counters.
@@ -45,8 +46,10 @@ load generator ──HTTP──▶ collector ──▶ Kafka/Redpanda [raw-event
 
 Key decisions, with their reasons, are in [docs/architecture.md](docs/architecture.md). The most important:
 
-- **At-least-once delivery plus deduplication.** Offsets are committed only after processing; the aggregator
-  applies counters, then remembers the event ids, then commits. A crash replays a batch, never loses one.
+- **At-least-once delivery, exactly-once counting.** Offsets are committed only after processing, so a crash replays
+  a batch and never loses one. The aggregator makes the replay harmless: it stores each partition's processed offset
+  in the **same MongoDB transaction** as the counters and only counts what lies beyond it, and it reserves each event
+  for the message that carries it (Redis, atomic Lua) to drop copies arriving at other offsets.
 - **Partition key = site + visitor**, so one visitor's events stay ordered, which sessionization needs.
 - **Open-loop load generation** (fixed rate, latency measured from the intended send time), so a slow server cannot
   hide its own saturation (coordinated omission).
@@ -132,7 +135,7 @@ Details, method and mistakes: [docs/resilience.md](docs/resilience.md).
 | Events lost | none, in all 9 recorded runs |
 | Over-counting | 2 runs out of 9, +49 events (0.013 %) and +2 events (0.0006 %) |
 | Kafka session timeout 30 s → 10 s | consumer lag after a crash ~10× lower, cascading restarts gone |
-| Known limit | the duplicate check is not atomic across instances; proposed fix: store the processed offset in the same MongoDB transaction as the counters |
+| Fix (after these runs) | processed offset stored in the same MongoDB transaction as the counters; unit, integration and randomized tests count exactly once; failure runs to be repeated |
 
 ## Repository layout
 
@@ -167,7 +170,8 @@ GitHub Actions. Integration tests share one infrastructure, so each test package
 ## Known limits
 
 - One machine, one Kubernetes node, generator and cluster competing for the same cores.
-- At-least-once with deduplication, **not** exactly-once: rare over-counting under rebalance (measured, see above).
+- Exactly-once counting is designed and tested, but the failure runs that measured the old over-count have not been
+  repeated yet. It relies on MongoDB transactions, so MongoDB runs as a single-node replica set.
 - Infrastructure (Redpanda, MongoDB, Redis) runs as single, non-persistent instances in the chart.
 - The processor and aggregator health probes only prove the process answers on `/metrics`; they do not check
   Kafka or MongoDB connectivity.

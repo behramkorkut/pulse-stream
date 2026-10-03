@@ -12,8 +12,11 @@ a throwaway cluster, and a failure test that kills pods with SIGKILL under load.
 
 The property I cared about most is that **an accepted event is counted exactly once**. I verified it end to end
 after every load run. In the failure tests it held for loss (no event lost in 9 recorded runs) and did **not** hold
-for duplicates (2 runs over-counted, by 0.013 % and 0.0006 %). I did not fix that; I measured it, found the
-likely cause and wrote down the fix.
+for duplicates (2 runs over-counted, by 0.013 % and 0.0006 %). I first measured it, found the likely cause and wrote
+down the fix; I then implemented it: the processed Kafka offset of each partition is stored in the same MongoDB
+transaction as the counters, and the duplicate memory reserves each event for the message that carries it instead of
+marking it afterwards. Unit tests, an integration test with two concurrent transactions on a real MongoDB and a
+randomized simulation all count exactly once; the failure runs on Kubernetes still have to be repeated with it.
 
 ## What worked
 
@@ -82,15 +85,14 @@ written for BuildKit failed locally; I removed the mounts so it builds with both
 I would claim: no event lost across all recorded runs; the pipeline recovers from SIGKILL of any consumer;
 reliable lag metrics; reproducible measurements (`make` targets, scripts and commands are in the repository).
 
-I would not claim: exactly-once processing; production-scale throughput (one laptop, generator and cluster share the
+I would not claim yet: exactly-once counting under real failures (designed and tested, but the SIGKILL runs have
+not been repeated since the fix); production-scale throughput (one laptop, generator and cluster share the
 cores); statistical significance for the failure runs (9 runs, random timing); anything about per-session counters
 (not checked by the end-to-end test).
 
 ## What I would do next
 
-1. **Idempotent write.** Store the processed Kafka offset (per partition) in the same MongoDB transaction as the
-   counters and apply a batch only if its offset is newer. A replayed batch then has no effect, whatever the cause.
-   This needs a MongoDB replica set, because transactions do not exist on a standalone instance.
+1. **Repeat the failure runs** with the idempotent write, and report them like the first ones, failures included.
 2. **Cooperative rebalancing.** The client I used moves every partition away from every member on each rebalance. A
    client supporting the cooperative protocol would move only what is needed, shrinking the window for the race.
 3. **Lag measured outside the consumers**, so the metric survives the death of the consumer it measures. Today the

@@ -30,6 +30,10 @@ qui crée les topics.
 - **Sécurité.** Utilisateur 65532, système de fichiers racine en lecture seule (un `emptyDir` sur `/tmp`),
   `allowPrivilegeEscalation: false`, toutes les capabilities Linux retirées, profil seccomp par défaut. L'infrastructure
   (Redpanda, MongoDB, Redis) n'est pas durcie de la même façon : ce sont des images tierces de développement.
+- **MongoDB en jeu de répliques d'un nœud.** L'aggregator écrit compteurs et positions Kafka dans une transaction, qui
+  n'existe pas sur une instance isolée. La sonde de démarrage initialise le jeu de répliques et n'aboutit qu'une fois
+  le nœud primaire ; les programmes s'y connectent avec `directConnection=true` (le membre s'annonce comme
+  `localhost:27017`). Le tunnel de `make k8s-load-verify` et de `make k8s-chaos` utilise la même option.
 - **Ordre de démarrage.** Les programmes qui utilisent Kafka ont un `initContainer` qui attend que les topics existent
   (créés par le Job `create-topics`). Aucun ordre n'est garanti entre pods : c'est chaque pod qui attend ce dont il a besoin.
 - **Découverte automatique des cibles.** Chaque pod de programme porte les annotations `prometheus.io/scrape`, `/port` et

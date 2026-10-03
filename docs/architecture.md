@@ -78,20 +78,38 @@ lot qui franchit une coupure ».
 
 L'aggregator lit `enriched-events` (groupe `pulse-aggregator`) et maintient, dans MongoDB, un document par
 site et par minute (`_id = site|2026-09-30T11:00Z`) avec les compteurs `pageviews`, `clicks`, `bot_events`,
-`sessions` et les répartitions `devices.*` / `browsers.*`. Chaque lot suit cet ordre précis :
+`sessions` et les répartitions `devices.*` / `browsers.*`. Le but : compter chaque événement accepté **exactement une
+fois**, malgré les crashs, les rééquilibrages et les doublons. Chaque lot suit cet ordre :
 
-1. décoder (un message inexploitable est écarté et journalisé, jamais bloquant) et écarter les doublons du lot
-   (même site, même identifiant) ;
-2. demander à Redis quels événements (site et identifiant) ont déjà été comptés (`MGET`) et les écarter ;
-3. cumuler les compteurs dans MongoDB (un seul `BulkWrite` d'upserts avec `$inc`) ;
-4. **seulement alors**, mémoriser les identifiants comptés dans Redis (`SET ... EX`, TTL de 90 min, voir
-   « Événements en retard ») ;
-5. puis valider les offsets Kafka.
+1. **décoder** (un message inexploitable est écarté et journalisé, jamais bloquant), en notant la position
+   (partition, offset) de chaque événement et le dernier offset du lot dans chaque partition ;
+2. **réserver** chaque événement (site + identifiant) dans Redis pour le message qui le porte (`topic/partition:offset`),
+   par un script Lua atomique, TTL de 90 min (voir « Événements en retard »). Le premier message qui réserve un
+   événement en est le propriétaire ; un événement déjà réservé par un *autre* message est un doublon, écarté ;
+3. **écrire dans MongoDB, en une transaction** : lire la position enregistrée de chaque partition du lot, cumuler
+   (`$inc`) les compteurs des seuls événements dont l'offset la dépasse, puis enregistrer les nouvelles positions
+   (collection `kafka_positions`) ;
+4. **valider** les offsets dans Kafka.
 
-Pourquoi cet ordre : un crash entre 3 et 4 fait recompter le lot (au pire des doublons), un crash entre 4 et 5
-ne recompte rien (les identifiants sont déjà mémorisés). Mémoriser avant d'écrire ferait l'inverse : si
-l'écriture échoue, la relecture verrait les identifiants comme « déjà comptés » et les événements seraient
-perdus. Entre deux maux, on choisit le doublon rare plutôt que la perte silencieuse.
+Pourquoi c'est exact, quel que soit le moment d'un crash :
+
+- *Avant l'écriture (3)* : rien n'est écrit ni validé, le lot est relu. Chaque message retrouve **sa propre**
+  réservation et compte son événement. Réserver avant d'écrire ne perd donc rien, contrairement à un simple « déjà vu ».
+- *Après l'écriture, avant la validation (entre 3 et 4)* : le lot relu est entièrement couvert par les positions
+  écrites dans la même transaction que les compteurs. Il n'ajoute rien.
+- *Deux instances sur les mêmes messages (rééquilibrage)* : toutes deux se trouvent propriétaires, lisent la même
+  position et veulent l'avancer. MongoDB détecte le conflit d'écriture sur le document de position, annule une des
+  deux transactions et le pilote la rejoue : au second passage, elle lit la position avancée et n'ajoute rien.
+- *Une copie de l'événement plus loin dans la partition* (renvoi du client, relecture du processor) : elle trouve
+  l'événement réservé par un autre message et l'écarte, même si ce propriétaire n'a pas encore écrit : il sera relu
+  et l'écrira.
+- *Un nouvel essai après une erreur ambiguë* (la transaction a peut-être abouti) : idempotent pour la même raison.
+
+Les messages d'une partition arrivent dans l'ordre et Kafka ne valide un offset qu'après l'écriture : la position
+enregistrée est donc toujours au moins égale à l'offset validé, et tout offset inférieur à la position a été traité.
+Ce schéma a été vérifié par une simulation aléatoire (deux consommateurs, crashs entre toutes les étapes, validations
+Kafka qui reculent, doublons à des offsets différents) : 20 000 scénarios exacts sur 20 000, quand l'ancien schéma
+(vérifier, écrire, puis mémoriser) en ratait les trois quarts dans le même simulateur.
 
 Le temps utilisé est celui de l'**événement** : un événement en retard tombe dans la bonne minute. Les robots
 n'alimentent que `bot_events`. Les clés des répartitions sont filtrées sur une liste blanche (sinon `other`) :
@@ -109,16 +127,28 @@ volontairement l'identifiant d'un autre site. Coût mesuré sur Redis 7 avec les
 compté puis rejoué dans l'heure qui suit (crash, rééquilibrage) serait recompté une fois. Tests de régression :
 `TestRunnerCountsTheSameIDOnDifferentSites` et deux nouveaux cas de contrat dans le paquet `dedupe`.
 
-Limites assumées, à documenter honnêtement :
+**Correction : le double comptage sous panne.** La première version vérifiait les identifiants dans Redis, écrivait
+les compteurs, puis mémorisait les identifiants. Deux trous : un crash entre l'écriture et la mémorisation faisait
+recompter le lot, et deux instances pendant un rééquilibrage consultaient Redis avant que l'une ait mémorisé, puis
+écrivaient toutes deux. Les tests de panne l'ont mesuré (de 0,0006 % à 0,013 % d'événements en trop,
+`docs/resilience.md`). La version actuelle (réservation avec propriétaire, positions dans la même transaction) ferme
+les deux. Tests : `TestCrashAfterWritingDoesNotCountTheBatchTwice` (remplace l'ancien test qui *mesurait* la limite),
+`TestTwoInstancesOnTheSameMessagesCountThemOnce`, `TestRunnerCountsAfterAFailedWriteWhenTheBatchIsReplayed`, et, sur
+un vrai MongoDB, `TestMongoConcurrentApplyOfTheSameBatchCountsOnce` (deux transactions concurrentes sur le même lot).
 
-- `$inc` n'est pas idempotent : si `Apply` échoue *après* avoir appliqué une partie du lot puis est retenté,
-  ces compteurs peuvent être comptés deux fois. L'éviter demanderait des transactions (Mongo en jeu de
-  répliques) ou un état idempotent par construction (par exemple stocker les identifiants d'événements par bucket).
-- Fenêtre Apply -> Mark : un crash pile entre les deux fait recompter un lot une fois (démontré par
-  `TestKnownLimitCrashBetweenApplyAndMarkCountsTheBatchTwice`). Les tests de panne (`docs/resilience.md`) ont montré
-  qu'une seconde cause existe : la vérification des doublons n'est pas atomique entre instances, donc deux instances
-  qui traitent les mêmes messages pendant un rééquilibrage peuvent les compter chacune. Écarts mesurés : de 0,0006 %
-  à 0,013 %, jamais de perte.
+Limites et coûts, à documenter honnêtement :
+
+- **Un jeu de répliques MongoDB est obligatoire**, même d'un seul nœud (compose et chart le configurent) : les
+  transactions n'existent pas sur une instance isolée. Les clients s'y connectent avec `directConnection=true`.
+- **Les positions supposent que les topics ne sont pas recréés.** Si `enriched-events` est supprimé puis recréé
+  (offsets repartant de 0) alors que MongoDB garde ses positions, les nouveaux messages seraient pris pour des
+  rejeux et ignorés. Repartir de zéro des deux côtés (`docker compose down -v`), ou vider `kafka_positions`.
+- **Contention entre aggregators** : les documents (site, minute) sont partagés. Deux transactions qui incrémentent le
+  même document en même temps entrent en conflit, et l'une est rejouée. Correct, mais plus lent à plusieurs
+  instances sur peu de sites. Piste : un document par (site, minute, partition), écrit par un seul propriétaire, et
+  une somme à la lecture.
+- **Fenêtres de mémoire** : un doublon reçu plus de 90 min après la réservation de l'original (TTL Redis) serait
+  recompté ; le retard maximal toléré est réglé pour que cela n'arrive pas (voir « Événements en retard »).
 - La mémoire Redis du dédoublonnage croît avec le débit x le TTL. À grande échelle : fenêtre plus courte,
   filtre de Bloom, ou état local par partition.
 
@@ -147,8 +177,8 @@ Limites du choix actuel, assumées :
 - **Les compteurs pré-agrégés perdent le détail.** Impossible de recalculer après coup des visiteurs uniques, une
   répartition par page ou par référent, ou une autre granularité que la minute, sans relire Kafka (dans la limite de
   sa rétention).
-- **Les transactions exigent un jeu de répliques.** C'est ce qui bloque aujourd'hui l'écriture idempotente (voir
-  `resilience.md`) ; un jeu de répliques d'un seul nœud suffit à les activer.
+- **Les transactions exigent un jeu de répliques.** L'écriture idempotente (compteurs et positions Kafka dans la même
+  transaction) en dépend : compose et chart démarrent donc MongoDB en jeu de répliques d'un seul nœud.
 - **Un gros site concentre ses écritures sur un document par minute.** Le cumul par lot avant `$inc` limite le nombre
   d'écritures, mais ses événements sont répartis sur toutes les partitions : plusieurs aggregators se disputent alors
   le même document.
@@ -224,7 +254,7 @@ Le trafic de supervision est ainsi séparé du trafic métier. Les métriques ut
 | `pulse_consumer_lag{consumer}` | jauge | messages publiés mais pas encore validés par le groupe, **somme de toutes les partitions** |
 | `pulse_processor_events_total{outcome}` | compteur | écrits : `enriched` ou `dead_letter` |
 | `pulse_processor_dead_letters_total{reason}` | compteur | rejets par raison (`invalid_json`, `invalid_event`, `encode_error`, `too_late`) |
-| `pulse_aggregator_events_total{outcome}` | compteur | `counted`, `duplicate`, `skipped` |
+| `pulse_aggregator_events_total{outcome}` | compteur | `counted`, `duplicate`, `replayed` (déjà couvert par la position : lot rejoué), `skipped` |
 | `pulse_aggregator_buckets_written_total` | compteur | documents (site, minute) mis à jour |
 | `pulse_aggregator_store_duration_seconds` | histogramme | durée d'un appel MongoDB |
 | `pulse_end_to_end_latency_seconds` | histogramme | **fraîcheur** : de la réception par le collector à l'écriture des compteurs dans MongoDB |
@@ -305,8 +335,7 @@ défaut), puis vérifie que le pipeline a compté exactement ce que le collector
   **dépasse** l'attendu est un double comptage (échec immédiat, les compteurs ne font que croître) ; un total qui se
   stabilise **en dessous** est une perte. Le code de sortie est non nul en cas d'échec.
 - **Limites.** Le client et le collector tournent sur le même Mac : les chiffres valent pour cette machine, pas pour un
-  cluster. L'agrégation `$inc` n'est pas idempotente en cas de crash entre l'écriture et le commit (voir plus haut) :
-  la vérification elle-même ne simule pas de panne ; `make k8s-chaos` le fait (voir `docs/resilience.md`).
+  cluster. La vérification elle-même ne simule pas de panne ; `make k8s-chaos` le fait (voir `docs/resilience.md`).
 
 ## Principes de conception
 

@@ -95,12 +95,31 @@ c'est cohérent avec cette hypothèse, mais 9 runs ne permettent pas de conclure
   15 ms) la situe plutôt à 2-4 %. Un résultat exact sur 6 crashs n'était donc pas une surprise.
 - J'attendais un blocage de 30 s après un arrêt brutal et ne l'ai pas vu avec l'arrêt rapide, pour la raison ci-dessus.
 
+## Correction (3 octobre 2026) : écriture idempotente
+
+Les deux causes de surcomptage décrites plus haut sont fermées par le même mécanisme (détail dans
+`architecture.md`, « Aggregator ») :
+
+- l'offset traité de chaque partition est enregistré **dans la même transaction MongoDB** que les compteurs, et un
+  événement n'est compté que si son offset dépasse cette position : un lot rejoué après un crash n'ajoute rien, et
+  de deux instances qui traitent le même lot pendant un rééquilibrage, MongoDB n'en laisse écrire qu'une (conflit
+  d'écriture sur le document de position) ;
+- la mémoire des doublons ne « marque » plus après coup : elle **réserve** chaque événement pour le message qui le
+  porte, avant l'écriture. Un message relu retrouve sa propre réservation (rien n'est perdu), une copie de
+  l'événement à un autre offset est écartée.
+
+MongoDB tourne désormais en jeu de répliques d'un nœud (les transactions l'exigent). Le test qui *mesurait* la
+fenêtre Apply → Mark (`TestKnownLimitCrashBetweenApplyAndMarkCountsTheBatchTwice`) est remplacé par un test qui
+exige un seul comptage, plus un test de deux instances concurrentes et un test de deux transactions concurrentes
+sur un vrai MongoDB.
+
+**Ce qui reste à démontrer** : les neuf runs ci-dessus ont été faits avec l'ancienne version. Il faut les refaire
+avec la nouvelle (commandes ci-dessous) avant d'affirmer « aucun double comptage » sous panne réelle ; la métrique
+`pulse_aggregator_events_total{outcome="replayed"}` montrera les lots rejoués que les positions ont neutralisés.
+
 ## Pistes, par ordre de priorité
 
-1. **Écriture idempotente.** Enregistrer, dans la même transaction MongoDB que les compteurs, l'offset Kafka traité
-   (par partition) et ne l'appliquer que s'il avance. Un lot rejoué n'a alors aucun effet, quelle que soit la cause.
-   Demande un jeu de répliques MongoDB (les transactions n'existent pas sur une instance isolée) et fait grossir la
-   latence d'écriture.
+1. ~~**Écriture idempotente.**~~ Faite, voir ci-dessus ; reste à refaire les runs de panne.
 2. **Rééquilibrage coopératif.** Avec le protocole actuel de `kafka-go`, un rééquilibrage retire toutes les partitions
    à tous les membres ; un client prenant en charge le protocole coopératif (par exemple `franz-go`) ne déplace que le
    nécessaire, ce qui réduit les occasions de course.
