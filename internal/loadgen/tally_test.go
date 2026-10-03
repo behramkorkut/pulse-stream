@@ -54,3 +54,21 @@ func TestTallyMerge(t *testing.T) {
 		t.Errorf("Totals() après fusion = %+v, want %+v", got, want)
 	}
 }
+
+// Un événement trop en retard est accepté par le collector mais mis en dead-letter par le processor :
+// il ne doit pas figurer dans l'attendu, même renvoyé.
+func TestTallyExcludesTooLateEvents(t *testing.T) {
+	tally := Tally{}
+	tally.Add(Request{ID: "e1", Type: "pageview", Kind: KindValid}, 202)
+	tooLate := Request{ID: "e2", Type: "pageview", Kind: KindValid, TooLate: true}
+	tally.Add(tooLate, 202)
+	tooLate.Kind = KindDuplicate
+	tally.Add(tooLate, 202)
+
+	if got, want := tally.Totals(), (Totals{Pageviews: 1}); got != want {
+		t.Errorf("Totals() = %+v, want %+v", got, want)
+	}
+	if got := tally.TooLate(); got != 1 {
+		t.Errorf("TooLate() = %d, want 1", got)
+	}
+}

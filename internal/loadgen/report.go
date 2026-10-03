@@ -50,6 +50,7 @@ type Report struct {
 	Mix       Mix          `json:"mix"`
 	Steps     []StepReport `json:"steps"`
 	Expected  Totals       `json:"expected"`
+	TooLate   int          `json:"too_late"` // acceptés mais trop en retard : attendus en dead-letter, pas dans MongoDB
 	Verified  *Verified    `json:"verified,omitempty"`
 }
 

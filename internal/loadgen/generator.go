@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"time"
+
+	"github.com/behramkorkut/pulse-stream/internal/event"
 )
 
 // Kind distingue la nature d'une requête générée.
@@ -28,6 +30,8 @@ type Mix struct {
 	Invalid   float64 // part des requêtes refusées par le collector
 	Bot       float64 // part des événements valides émis par des robots
 	Click     float64 // part des événements valides qui sont des clics (les autres : pageviews)
+	Late      float64 // part des événements valides envoyés en retard, dans la limite tolérée : comptés
+	TooLate   float64 // part des événements valides envoyés au-delà du retard toléré : dead-letter, jamais comptés
 }
 
 // GenConfig règle le générateur.
@@ -46,10 +50,18 @@ type Request struct {
 	ID   string // identifiant de l'événement ; vide pour KindInvalid
 	Type string // pageview | click ; vide pour KindInvalid
 	Bot  bool
+
+	// TooLate : envoyé au-delà du retard maximal toléré. Le collector l'accepte (202), mais le processor le
+	// met en dead-letter : il ne doit jamais apparaître dans les compteurs.
+	TooLate bool
 }
 
 // recentWindow : un doublon rejoue l'un des derniers événements valides, comme un client qui réessaie.
 const recentWindow = 128
+
+// lateMargin éloigne les événements en retard de la limite tolérée, dans un sens comme dans l'autre : une attente
+// en file (côté client ou serveur) ne doit jamais faire basculer un événement d'une catégorie à l'autre.
+const lateMargin = 5 * time.Minute
 
 var (
 	humanAgents = []string{
@@ -116,14 +128,38 @@ func (g *Generator) valid(now time.Time) Request {
 	if !bot {
 		agent = humanAgents[g.rng.IntN(len(humanAgents))]
 	}
+	ts, tooLate := g.timestamp(now)
 
 	body := fmt.Appendf(nil,
 		`{"id":%q,"type":%q,"site_id":%q,"visitor_id":%q,"url":"https://example.com/page-%d","user_agent":%q,"timestamp":%q}`,
-		id, typ, site, visitor, g.rng.IntN(50), agent, now.UTC().Format(time.RFC3339))
+		id, typ, site, visitor, g.rng.IntN(50), agent, ts.UTC().Format(time.RFC3339))
 
-	r := Request{Body: body, Kind: KindValid, ID: id, Type: typ, Bot: bot}
+	r := Request{Body: body, Kind: KindValid, ID: id, Type: typ, Bot: bot, TooLate: tooLate}
 	g.remember(r)
 	return r
+}
+
+// timestamp choisit l'instant porté par un nouvel événement : à l'heure, en retard dans la limite tolérée (entre
+// 1 min et MaxLateness - 5 min), ou trop en retard (entre MaxLateness + 5 min et MaxLateness + 65 min). Les
+// événements en retard arrivent dans le désordre et retombent dans des minutes déjà écrites : c'est ce qui exerce
+// le temps de l'événement de bout en bout.
+func (g *Generator) timestamp(now time.Time) (ts time.Time, tooLate bool) {
+	if g.cfg.Mix.Late+g.cfg.Mix.TooLate <= 0 {
+		return now, false // aucun tirage : sans retard demandé, une graine produit la même suite qu'avant
+	}
+	roll := g.rng.Float64()
+	switch {
+	case roll < g.cfg.Mix.TooLate:
+		return now.Add(-(event.MaxLateness + lateMargin + g.jitter(time.Hour))), true
+	case roll < g.cfg.Mix.TooLate+g.cfg.Mix.Late:
+		return now.Add(-(time.Minute + g.jitter(event.MaxLateness-time.Minute-lateMargin))), false
+	}
+	return now, false
+}
+
+// jitter tire une durée dans [0, upTo).
+func (g *Generator) jitter(upTo time.Duration) time.Duration {
+	return time.Duration(g.rng.Int64N(int64(upTo)))
 }
 
 func (g *Generator) remember(r Request) {

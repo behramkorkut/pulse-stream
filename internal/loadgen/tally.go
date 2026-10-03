@@ -12,8 +12,9 @@ type Totals struct {
 type Tally map[string]ackInfo
 
 type ackInfo struct {
-	typ string
-	bot bool
+	typ     string
+	bot     bool
+	tooLate bool // accepté, mais trop en retard : attendu en dead-letter, pas dans les compteurs
 }
 
 // Add enregistre une requête et la réponse du collector. Seuls les nouveaux événements acceptés comptent ;
@@ -22,7 +23,7 @@ func (t Tally) Add(r Request, status int) {
 	if status != 202 || r.Kind == KindInvalid || r.ID == "" {
 		return
 	}
-	t[r.ID] = ackInfo{typ: r.Type, bot: r.Bot}
+	t[r.ID] = ackInfo{typ: r.Type, bot: r.Bot, tooLate: r.TooLate}
 }
 
 // Merge ajoute les entrées de other.
@@ -32,11 +33,14 @@ func (t Tally) Merge(other Tally) {
 	}
 }
 
-// Totals convertit le bilan en compteurs attendus : les robots comptent à part, jamais comme pageviews ou clics.
+// Totals convertit le bilan en compteurs attendus : les robots comptent à part, jamais comme pageviews ou clics,
+// et les événements trop en retard ne comptent pas du tout.
 func (t Tally) Totals() Totals {
 	var out Totals
 	for _, info := range t {
 		switch {
+		case info.tooLate:
+			continue
 		case info.bot:
 			out.Bots++
 		case info.typ == "click":
@@ -46,4 +50,16 @@ func (t Tally) Totals() Totals {
 		}
 	}
 	return out
+}
+
+// TooLate compte les événements acceptés par le collector mais trop en retard : le processor les met en
+// dead-letter, MongoDB ne doit pas les compter.
+func (t Tally) TooLate() int {
+	n := 0
+	for _, info := range t {
+		if info.tooLate {
+			n++
+		}
+	}
+	return n
 }

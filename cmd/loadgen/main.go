@@ -41,6 +41,8 @@ func run() error {
 		invalid   = flag.Float64("invalid", 0.01, "part des requêtes invalides (refusées par le collector)")
 		bots      = flag.Float64("bots", 0.05, "part des événements valides émis par des robots")
 		clicks    = flag.Float64("clicks", 0.20, "part des événements valides qui sont des clics")
+		late      = flag.Float64("late", 0.02, "part des événements valides envoyés en retard, dans la limite tolérée (comptés)")
+		tooLate   = flag.Float64("too-late", 0.005, "part des événements valides envoyés trop en retard (dead-letter, jamais comptés)")
 		seed      = flag.Uint64("seed", 1, "graine du générateur (même graine, mêmes événements)")
 		out       = flag.String("out", "bench/last-run.json", "fichier JSON où écrire la trace de l'exécution")
 		verify    = flag.Bool("verify", true, "comparer, à la fin, ce que MongoDB a compté à ce que le collector a accepté")
@@ -61,12 +63,13 @@ func run() error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	runID := strconv.FormatInt(time.Now().Unix(), 10)
-	mix := loadgen.Mix{Duplicate: *dup, Invalid: *invalid, Bot: *bots, Click: *clicks}
+	mix := loadgen.Mix{Duplicate: *dup, Invalid: *invalid, Bot: *bots, Click: *clicks, Late: *late, TooLate: *tooLate}
 	gen := loadgen.NewGenerator(loadgen.GenConfig{RunID: runID, Sites: *sites, Visitors: *visitors, Mix: mix, Seed: *seed})
 
 	fmt.Printf("Charge %s : paliers %v pendant %s chacun, %d requêtes simultanées au plus\n", runID, steps, *duration, *workers)
-	fmt.Printf("Composition : %.0f%% de renvois, %.0f%% d'invalides, %.0f%% de robots, %.0f%% de clics\n\n",
-		*dup*100, *invalid*100, *bots*100, *clicks*100)
+	fmt.Printf("Composition : %.0f%% de renvois, %.0f%% d'invalides, %.0f%% de robots, %.0f%% de clics, "+
+		"%.1f%% en retard, %.1f%% trop en retard\n\n",
+		*dup*100, *invalid*100, *bots*100, *clicks*100, *late*100, *tooLate*100)
 
 	report := loadgen.Report{RunID: runID, StartedAt: time.Now().UTC(), URL: *url, Workers: *workers, Mix: mix}
 	acked := loadgen.Tally{}
@@ -99,8 +102,12 @@ func run() error {
 	fmt.Println()
 	loadgen.WriteTable(os.Stdout, results)
 	report.Expected = acked.Totals()
+	report.TooLate = acked.TooLate()
 	fmt.Printf("\nAttendu dans MongoDB (événements acceptés, chacun une fois) : %d pageviews, %d clics, %d événements de robots\n",
 		report.Expected.Pageviews, report.Expected.Clicks, report.Expected.Bots)
+	if report.TooLate > 0 {
+		fmt.Printf("Exclus : %d événements acceptés mais trop en retard (attendus dans dead-letter, raison too_late)\n", report.TooLate)
+	}
 
 	if *verify && ctx.Err() == nil {
 		v, err := verifyMongo(ctx, log, *mongoURI, *mongoDB, *mongoColl, gen.SitePrefix(), report.Expected, *verifyFor)

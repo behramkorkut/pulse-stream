@@ -71,7 +71,8 @@ func TestBotsAreClassifiedLikeTheProcessorDoes(t *testing.T) {
 }
 
 func TestSameSeedGivesTheSameEvents(t *testing.T) {
-	a, b := newGen(Mix{Duplicate: 0.1, Invalid: 0.1, Bot: 0.2, Click: 0.3}), newGen(Mix{Duplicate: 0.1, Invalid: 0.1, Bot: 0.2, Click: 0.3})
+	mix := Mix{Duplicate: 0.1, Invalid: 0.1, Bot: 0.2, Click: 0.3, Late: 0.1, TooLate: 0.05}
+	a, b := newGen(mix), newGen(mix)
 	for i := 0; i < 500; i++ {
 		if ra, rb := a.Next(testNow), b.Next(testNow); !bytes.Equal(ra.Body, rb.Body) || ra.Kind != rb.Kind {
 			t.Fatalf("requête %d différente avec la même graine :\n%s\n%s", i, ra.Body, rb.Body)
@@ -158,4 +159,54 @@ func TestInvalidRequestsAreRefusedByTheCollectorRules(t *testing.T) {
 	if broken == 0 || incomplete == 0 {
 		t.Errorf("400 : %d, 422 : %d, want les deux variantes", broken, incomplete)
 	}
+}
+
+// Chaque événement doit tomber nettement dans sa catégorie, et le processor doit en juger comme le générateur :
+// sinon l'attendu de la vérification de bout en bout serait faux.
+func TestLateEventsAreJudgedLikeTheProcessorDoes(t *testing.T) {
+	const n = 4000
+	g := newGen(Mix{Late: 0.30, TooLate: 0.20})
+
+	var onTime, late, tooLate int
+	for i := 0; i < n; i++ {
+		r := g.Next(testNow)
+		e, problems, err := decodeStrict(r.Body)
+		if err != nil || len(problems) > 0 {
+			t.Fatalf("événement %d refusé par le collector : err=%v problèmes=%v", i, err, problems)
+		}
+
+		lateness := testNow.Sub(e.Timestamp)
+		switch {
+		case r.TooLate:
+			tooLate++
+			if lateness < event.MaxLateness+lateMargin {
+				t.Fatalf("événement %s « trop en retard » de %v seulement : trop près de la limite", r.ID, lateness)
+			}
+		case lateness == 0:
+			onTime++
+		default:
+			late++
+			if lateness < time.Minute || lateness > event.MaxLateness-lateMargin+time.Second {
+				t.Fatalf("événement %s en retard de %v : hors de la bande tolérée", r.ID, lateness)
+			}
+		}
+
+		// Ce que décide le processor, avec l'heure de réception que poserait le collector.
+		e.ReceivedAt = testNow
+		raw, _ := json.Marshal(e)
+		res := processor.Transform(raw, processor.Source{}, testNow)
+		if dead := res.Dead != nil && res.Dead.Reason == processor.ReasonTooLate; dead != r.TooLate {
+			t.Fatalf("événement %s : générateur TooLate=%v, processor dead-letter too_late=%v", r.ID, r.TooLate, dead)
+		}
+	}
+
+	near := func(name string, got int, want float64) {
+		t.Helper()
+		if frac := float64(got) / n; frac < want-0.03 || frac > want+0.03 {
+			t.Errorf("%s : %.3f, want %.2f ± 0,03", name, frac, want)
+		}
+	}
+	near("à l'heure", onTime, 0.50)
+	near("en retard", late, 0.30)
+	near("trop en retard", tooLate, 0.20)
 }
