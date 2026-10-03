@@ -372,6 +372,53 @@ func TestRunnerCountsEventsByOutcome(t *testing.T) {
 	}
 }
 
+// histogramOf lit le nombre d'observations et leur somme d'un histogramme du registre.
+func histogramOf(t *testing.T, reg *prometheus.Registry, name string) (count uint64, sum float64) {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather : %v", err)
+	}
+	for _, mf := range families {
+		if mf.GetName() == name {
+			h := mf.GetMetric()[0].GetHistogram()
+			return h.GetSampleCount(), h.GetSampleSum()
+		}
+	}
+	t.Fatalf("métrique %s absente du registre", name)
+	return 0, 0
+}
+
+// La fraîcheur se mesure sur chaque événement compté, depuis sa réception par le collector. Un doublon n'est pas
+// mesuré une seconde fois ; un événement sans heure de réception (autre producteur) ne l'est pas du tout.
+func TestRunnerObservesEndToEndLatency(t *testing.T) {
+	received := time.Now().Add(-2 * time.Second)
+	e1 := human("e1", "site-42", event.TypePageview, "desktop", "chrome", 0, true)
+	e1.ReceivedAt = received
+	e2 := human("e2", "site-42", event.TypeClick, "desktop", "chrome", time.Second, false)
+	e2.ReceivedAt = received
+	foreign := human("e3", "site-42", event.TypePageview, "desktop", "chrome", 2*time.Second, false)
+
+	reg := prometheus.NewRegistry()
+	cfg := testConfig()
+	cfg.Metrics = NewMetrics(reg)
+	r := newRig([]kafka.Message{msgFor(t, 0, e1), msgFor(t, 1, e2), msgFor(t, 2, e1), msgFor(t, 3, foreign)}, cfg)
+	stop := r.start(t)
+
+	waitFor(t, "les 4 offsets validés", func() bool { return r.src.committed() == 4 })
+	if err := stop(); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	count, sum := histogramOf(t, reg, "pulse_end_to_end_latency_seconds")
+	if count != 2 {
+		t.Errorf("%d mesures, want 2 (e1 et e2 ; ni le doublon de e1, ni e3 sans heure de réception)", count)
+	}
+	if sum < 4 {
+		t.Errorf("somme = %.2f s, want au moins 4 s (deux événements reçus il y a 2 s)", sum)
+	}
+}
+
 func TestMetricsSeriesExistAtZeroFromTheStart(t *testing.T) {
 	m := NewMetrics(prometheus.NewRegistry())
 	if got := testutil.CollectAndCount(m.events); got != 3 {

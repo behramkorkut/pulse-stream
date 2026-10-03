@@ -96,9 +96,11 @@ func (r *Runner) handle(ctx context.Context, msgs []kafka.Message) error {
 		if err := retry.Do(ctx, r.log, "apply counters", applyOnce); err != nil {
 			return fmt.Errorf("apply counters: %w", err)
 		}
+		writtenAt := time.Now() // les compteurs sont visibles dans MongoDB à partir de cet instant
 		if err := retry.Do(ctx, r.log, "mark counted ids", func() error { return r.seen.Mark(ctx, freshKeys) }); err != nil {
 			return fmt.Errorf("mark counted ids: %w", err)
 		}
+		r.cfg.Metrics.observeLatency(fresh, writtenAt)
 	}
 
 	r.cfg.Metrics.observeBatch(len(fresh), duplicates, skipped, len(buckets))
