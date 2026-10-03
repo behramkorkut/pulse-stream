@@ -1,7 +1,8 @@
 {{- if .Values.infra.enabled }}
 {{- $l := dict "root" $ "name" "mongo" }}
-# MongoDB : compteurs par minute. StatefulSet, comme Redpanda (programme à état). Les données sont dans un volume
-# emptyDir : elles vivent aussi longtemps que le pod. Pour les garder, il faudrait un volumeClaimTemplate.
+# MongoDB : compteurs par minute et positions Kafka. StatefulSet, comme Redpanda (programme à état). Les données sont
+# dans un volume emptyDir : elles vivent aussi longtemps que le pod. Pour les garder, il faudrait un
+# volumeClaimTemplate. Jeu de répliques d'UN nœud : les transactions de l'aggregator l'exigent.
 apiVersion: v1
 kind: Service
 metadata:
@@ -36,22 +37,29 @@ spec:
       containers:
         - name: mongo
           image: {{ .Values.infra.mongo.image }}
-          # Sans ce réglage, MongoDB dimensionne son cache d'après la mémoire de la MACHINE et non celle du pod.
-          args: ["--wiredTigerCacheSizeGB", "0.25"]
+          # Sans --wiredTigerCacheSizeGB, MongoDB dimensionne son cache d'après la mémoire de la MACHINE et non
+          # celle du pod.
+          args: ["--replSet", "rs0", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
           ports:
             - name: mongo
               containerPort: 27017
           volumeMounts:
             - name: data
               mountPath: /data/db
+          # Au premier passage, la sonde de démarrage initialise le jeu de répliques ; elle ne réussit qu'une fois ce
+          # nœud primaire (les écritures sont alors possibles). Les clients se connectent avec directConnection=true.
           startupProbe:
             exec:
-              command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+              command:
+                - mongosh
+                - --quiet
+                - --eval
+                - "try { rs.status() } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]}) }; quit(db.hello().isWritablePrimary ? 0 : 1)"
             periodSeconds: 5
             failureThreshold: 30
           readinessProbe:
             exec:
-              command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+              command: ["mongosh", "--quiet", "--eval", "quit(db.hello().isWritablePrimary ? 0 : 1)"]
             periodSeconds: 10
             timeoutSeconds: 5
           resources:

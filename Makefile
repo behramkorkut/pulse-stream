@@ -188,7 +188,7 @@ k8s-load: build ## Charge sur le collector DU CLUSTER (sans verification MongoDB
 k8s-load-verify: build ## Charge sur le cluster AVEC verification exacte dans MongoDB : make k8s-load-verify RATES=3000 DURATION=30s
 	@kubectl port-forward --namespace $(NAMESPACE) mongo-0 27018:27017 >/dev/null 2>&1 & echo $$! > .pf.pid; \
 	sleep 3; \
-	./bin/loadgen -url http://localhost:18080/collect -mongo-uri mongodb://localhost:27018 -rates $(RATES) -duration $(DURATION) -workers $(WORKERS); \
+	./bin/loadgen -url http://localhost:18080/collect -mongo-uri 'mongodb://localhost:27018/?directConnection=true' -rates $(RATES) -duration $(DURATION) -workers $(WORKERS); \
 	status=$$?; kill $$(cat .pf.pid) 2>/dev/null; rm -f .pf.pid; exit $$status
 
 k8s-chaos: build ## Test de panne : make k8s-chaos APP=aggregator MODE=crash KILLS=6 INTERVAL=40 RATES=2000 DURATION=120s

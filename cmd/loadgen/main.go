@@ -46,7 +46,7 @@ func run() error {
 		seed      = flag.Uint64("seed", 1, "graine du générateur (même graine, mêmes événements)")
 		out       = flag.String("out", "bench/last-run.json", "fichier JSON où écrire la trace de l'exécution")
 		verify    = flag.Bool("verify", true, "comparer, à la fin, ce que MongoDB a compté à ce que le collector a accepté")
-		mongoURI  = flag.String("mongo-uri", "mongodb://localhost:27017", "adresse de MongoDB (pour -verify)")
+		mongoURI  = flag.String("mongo-uri", "mongodb://localhost:27017/?directConnection=true", "adresse de MongoDB (pour -verify)")
 		mongoDB   = flag.String("mongo-db", "pulse", "base MongoDB (pour -verify)")
 		mongoColl = flag.String("mongo-collection", "minute_stats", "collection MongoDB (pour -verify)")
 		verifyFor = flag.Duration("verify-timeout", 2*time.Minute, "attente maximale de la fin du traitement (pour -verify)")

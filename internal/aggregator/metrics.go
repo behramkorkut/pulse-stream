@@ -11,7 +11,7 @@ import (
 
 // Metrics mesure ce que l'aggregator fait des messages. Un *Metrics nil est valide (no-op).
 type Metrics struct {
-	events  *prometheus.CounterVec // messages lus, par issue (counted | duplicate | skipped)
+	events  *prometheus.CounterVec // messages lus, par issue (counted | duplicate | replayed | skipped)
 	buckets prometheus.Counter     // documents (site, minute) mis à jour dans MongoDB
 	apply   prometheus.Histogram   // durée de chaque appel à MongoDB
 	latency prometheus.Histogram   // fraîcheur : de la réception par le collector à l'écriture dans MongoDB
@@ -23,7 +23,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	m := &Metrics{
 		events: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "pulse_aggregator_events_total",
-			Help: "Messages lus par l'aggregator, par issue : comptés, doublons écartés, inexploitables.",
+			Help: "Messages lus par l'aggregator, par issue : comptés, doublons écartés, déjà écrits (lot rejoué), inexploitables.",
 		}, []string{"outcome"}),
 		buckets: f.NewCounter(prometheus.CounterOpts{
 			Name: "pulse_aggregator_buckets_written_total",
@@ -42,19 +42,26 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	}
 
 	// Séries créées à zéro dès le départ (voir batch.NewMetrics : "No data" et première incrémentation perdue).
-	for _, outcome := range []string{"counted", "duplicate", "skipped"} {
+	for _, outcome := range []string{"counted", "duplicate", "replayed", "skipped"} {
 		m.events.WithLabelValues(outcome)
 	}
 	return m
 }
 
-// observeBatch est appelée une fois le lot compté ET mémorisé : on ne compte que ce qui est acquis.
-func (m *Metrics) observeBatch(counted, duplicates, skipped, buckets int) {
+// observeBatch est appelée une fois le lot écrit : on ne compte que ce qui est acquis.
+//
+//   - counted : comptés dans MongoDB ;
+//   - duplicate : réservés par un autre message (renvoi du client, relecture par le processor) ;
+//   - replayed : message déjà couvert par la position de sa partition (lot rejoué après un crash ou un
+//     rééquilibrage) : c'est l'écriture idempotente qui travaille ;
+//   - skipped : message inexploitable.
+func (m *Metrics) observeBatch(counted, duplicates, skipped, replayed, buckets int) {
 	if m == nil {
 		return
 	}
 	m.events.WithLabelValues("counted").Add(float64(counted))
 	m.events.WithLabelValues("duplicate").Add(float64(duplicates))
+	m.events.WithLabelValues("replayed").Add(float64(replayed))
 	m.events.WithLabelValues("skipped").Add(float64(skipped))
 	m.buckets.Add(float64(buckets))
 }

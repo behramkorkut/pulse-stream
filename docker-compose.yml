@@ -63,15 +63,20 @@ services:
       timeout: 3s
       retries: 10
 
+  # Jeu de répliques d'UN nœud : les transactions (compteurs et positions Kafka écrits ensemble, voir
+  # docs/architecture.md) n'existent pas sur une instance isolée. Le membre s'annonce comme localhost:27017 ; les
+  # clients s'y connectent donc directement (?directConnection=true), sans découverte de topologie.
   mongo:
     image: mongo:7
+    command: ["--replSet", "rs0", "--bind_ip_all"]
     networks: [pulse]
     ports:
       - "27017:27017"
     volumes:
       - mongo-data:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "mongosh --quiet --eval \"db.adminCommand('ping').ok\" | grep 1"]
+      # Initialise le jeu de répliques au premier passage, puis n'est « sain » qu'une fois ce nœud primaire.
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"try { rs.status() } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]}) }; quit(db.hello().isWritablePrimary ? 0 : 1)\""]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -181,7 +186,7 @@ services:
     environment:
       KAFKA_BROKERS: redpanda:9092
       REDIS_ADDR: redis:6379
-      MONGO_URI: mongodb://mongo:27017
+      MONGO_URI: mongodb://mongo:27017/?directConnection=true
     ports:
       - "9103:9103" # /metrics
     depends_on:

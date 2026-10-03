@@ -7,34 +7,31 @@ import (
 
 // Memory est une implémentation en mémoire de Store, pour les tests. Elle n'expire jamais rien.
 type Memory struct {
-	mu   sync.Mutex
-	seen map[Key]struct{}
+	mu     sync.Mutex
+	owners map[Key]string
 }
 
 // NewMemory crée un Store en mémoire.
 func NewMemory() *Memory {
-	return &Memory{seen: map[Key]struct{}{}}
+	return &Memory{owners: map[Key]string{}}
 }
 
-// Seen implémente Store.
-func (m *Memory) Seen(_ context.Context, keys []Key) ([]bool, error) {
+// Claim implémente Store.
+func (m *Memory) Claim(_ context.Context, keys []Key, owners []string) ([]string, error) {
+	if err := checkLengths(keys, owners); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	out := make([]bool, len(keys))
+	out := make([]string, len(keys))
 	for i, k := range keys {
-		_, out[i] = m.seen[k]
+		owner, taken := m.owners[k]
+		if !taken {
+			owner = owners[i]
+			m.owners[k] = owner
+		}
+		out[i] = owner
 	}
 	return out, nil
-}
-
-// Mark implémente Store.
-func (m *Memory) Mark(_ context.Context, keys []Key) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for _, k := range keys {
-		m.seen[k] = struct{}{}
-	}
-	return nil
 }

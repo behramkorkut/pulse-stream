@@ -18,58 +18,65 @@ func redisKey(k Key) string {
 	return keyPrefix + strconv.Itoa(len(k.SiteID)) + ":" + k.SiteID + ":" + k.EventID
 }
 
+// claimScript réserve, d'un bloc, toutes les clés d'un lot : une clé libre prend le propriétaire proposé, une clé
+// déjà réservée garde le sien. Un script Lua s'exécute sans qu'aucune autre commande s'intercale : deux instances
+// ne peuvent pas réserver la même clé chacune de leur côté.
+//
+//	KEYS[i] clé de l'événement    ARGV[1] durée de vie (secondes)    ARGV[i+1] propriétaire proposé pour KEYS[i]
+//
+// Retourne le propriétaire retenu pour chaque clé, dans l'ordre.
+const claimScript = `
+local ttl = tonumber(ARGV[1])
+local out = {}
+for i, key in ipairs(KEYS) do
+  local owner = redis.call('GET', key)
+  if not owner then
+    owner = ARGV[i + 1]
+    redis.call('SET', key, owner, 'EX', ttl)
+  end
+  out[i] = owner
+end
+return out
+`
+
 // Redis est un Store adossé à Redis : une clé par événement, qui expire seule.
 type Redis struct {
-	client redis.Cmdable
+	client redis.Scripter
+	script *redis.Script
 	ttl    time.Duration
 }
 
 // NewRedis crée un Store Redis.
-func NewRedis(client redis.Cmdable, ttl time.Duration) *Redis {
+func NewRedis(client redis.Scripter, ttl time.Duration) *Redis {
 	if ttl <= 0 {
 		ttl = DefaultTTL
 	}
-	return &Redis{client: client, ttl: ttl}
+	return &Redis{client: client, script: redis.NewScript(claimScript), ttl: ttl}
 }
 
-// Seen implémente Store avec un seul aller-retour (MGET) pour tout le lot.
-func (r *Redis) Seen(ctx context.Context, keys []Key) ([]bool, error) {
+// Claim implémente Store avec un seul aller-retour (un script) pour tout le lot.
+func (r *Redis) Claim(ctx context.Context, keys []Key, owners []string) ([]string, error) {
+	if err := checkLengths(keys, owners); err != nil {
+		return nil, err
+	}
 	if len(keys) == 0 {
 		return nil, nil
 	}
 
 	names := make([]string, len(keys))
+	args := make([]any, 0, len(keys)+1)
+	args = append(args, int64(r.ttl.Seconds()))
 	for i, k := range keys {
 		names[i] = redisKey(k)
+		args = append(args, owners[i])
 	}
 
-	values, err := r.client.MGet(ctx, names...).Result()
+	got, err := r.script.Run(ctx, r.client, names, args...).StringSlice()
 	if err != nil {
-		return nil, fmt.Errorf("redis mget: %w", err)
+		return nil, fmt.Errorf("redis claim script: %w", err)
 	}
-	if len(values) != len(keys) {
-		return nil, fmt.Errorf("redis mget: %d values for %d keys", len(values), len(keys))
+	if len(got) != len(keys) {
+		return nil, fmt.Errorf("redis claim script: %d réponses pour %d clés", len(got), len(keys))
 	}
-
-	seen := make([]bool, len(keys))
-	for i, v := range values {
-		seen[i] = v != nil // une clé absente est retournée comme nil
-	}
-	return seen, nil
-}
-
-// Mark implémente Store avec un seul aller-retour (pipeline) pour tout le lot.
-func (r *Redis) Mark(ctx context.Context, keys []Key) error {
-	if len(keys) == 0 {
-		return nil
-	}
-
-	pipe := r.client.Pipeline()
-	for _, k := range keys {
-		pipe.Set(ctx, redisKey(k), 1, r.ttl)
-	}
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("redis pipeline set: %w", err)
-	}
-	return nil
+	return got, nil
 }

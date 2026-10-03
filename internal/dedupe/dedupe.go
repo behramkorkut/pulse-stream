@@ -1,13 +1,23 @@
-// Package dedupe mémorise les identifiants d'événements déjà comptés, pour ne jamais compter deux fois
-// un événement livré deux fois (nouvel essai d'un client, relecture d'un lot après une panne).
+// Package dedupe désigne, pour chaque événement, le SEUL message qui le comptera.
 //
-// L'interface sépare volontairement la LECTURE (Seen) de l'ÉCRITURE (Mark) : l'appelant marque
-// les identifiants APRÈS avoir écrit ses résultats. Si le processus s'arrête entre les deux, les événements
-// seront recomptés (doublon) plutôt que perdus. Marquer avant risquerait l'inverse.
+// Un même événement peut arriver dans plusieurs messages Kafka : renvoi du client, relecture d'un lot par le
+// processor. Le premier message qui réserve l'événement en devient le « propriétaire » ; les autres sont des
+// doublons, écartés. Le propriétaire est un identifiant de message (topic, partition, offset), et c'est ce qui
+// rend sûr de réserver AVANT d'écrire :
+//
+//   - si le traitement échoue après la réservation, le message est relu, retrouve sa propre réservation et compte
+//     l'événement : rien n'est perdu ;
+//   - si deux instances traitent le même message (rééquilibrage), elles s'y reconnaissent toutes deux propriétaires :
+//     c'est l'aggregator qui garantit qu'une seule écrit (position par partition, dans la même transaction MongoDB
+//     que les compteurs).
+//
+// La version précédente marquait les identifiants APRÈS l'écriture (Seen, puis Mark) : un crash entre les deux,
+// ou deux instances qui consultaient Redis avant que l'une ait marqué, comptaient deux fois.
 package dedupe
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/behramkorkut/pulse-stream/internal/event"
@@ -38,11 +48,18 @@ type Key struct {
 	EventID string
 }
 
-// Store mémorise des événements déjà comptés.
+// Store réserve chaque événement pour un message propriétaire.
 type Store interface {
-	// Seen indique, pour chaque clé (dans le même ordre), si elle a déjà été marquée.
-	Seen(ctx context.Context, keys []Key) ([]bool, error)
+	// Claim réserve chaque clé pour owners[i] si elle est libre, et retourne pour chaque clé, dans le même ordre, le
+	// propriétaire retenu : owners[i] si la clé était libre ou déjà réservée par ce même message, sinon le
+	// propriétaire précédent. Dans un même appel, la première occurrence d'une clé l'emporte.
+	Claim(ctx context.Context, keys []Key, owners []string) ([]string, error)
+}
 
-	// Mark mémorise des clés. Marquer deux fois la même clé est sans effet.
-	Mark(ctx context.Context, keys []Key) error
+// checkLengths vérifie qu'il y a un propriétaire par clé.
+func checkLengths(keys []Key, owners []string) error {
+	if len(keys) != len(owners) {
+		return fmt.Errorf("dedupe: %d clés pour %d propriétaires", len(keys), len(owners))
+	}
+	return nil
 }

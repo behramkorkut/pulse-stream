@@ -73,7 +73,7 @@ sleep 3
 killer &
 KP=$!
 
-./bin/loadgen -url http://localhost:18080/collect -mongo-uri mongodb://localhost:27018 "$@"
+./bin/loadgen -url http://localhost:18080/collect -mongo-uri 'mongodb://localhost:27018/?directConnection=true' "$@"
 status=$?
 
 kill "$KP" "$PF" 2>/dev/null

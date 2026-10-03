@@ -16,7 +16,7 @@ image:
 config:
   kafkaBrokers: redpanda:9092
   redisAddr: redis:6379
-  mongoURI: mongodb://mongo:27017
+  mongoURI: mongodb://mongo:27017/?directConnection=true # jeu de répliques d'un nœud, connexion directe
 
 # --- Topics Kafka créés au démarrage (équivalent de `make topics`) ----------------------------------------------
 topics:

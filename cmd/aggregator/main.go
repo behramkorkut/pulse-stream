@@ -44,7 +44,8 @@ func run() error {
 	topic := getenv("KAFKA_TOPIC_ENRICHED", "enriched-events")
 	groupID := getenv("GROUP_ID", "pulse-aggregator")
 
-	mongoURI := getenv("MONGO_URI", "mongodb://localhost:27017")
+	// directConnection : MongoDB tourne en jeu de répliques d'un nœud qui s'annonce comme localhost:27017.
+	mongoURI := getenv("MONGO_URI", "mongodb://localhost:27017/?directConnection=true")
 	mongoDB := getenv("MONGO_DB", "pulse")
 	mongoColl := getenv("MONGO_COLLECTION", "minute_stats")
 	redisAddr := getenv("REDIS_ADDR", "localhost:6379")

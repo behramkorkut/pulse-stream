@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -24,7 +25,7 @@ type Config struct {
 	BatchMetrics *batch.Metrics // optionnel : mesures de la boucle de consommation
 }
 
-// Runner lit les événements enrichis par lots, écarte les doublons et cumule les compteurs.
+// Runner lit les événements enrichis par lots, écarte les doublons et cumule les compteurs, exactement une fois.
 type Runner struct {
 	src   batch.Source
 	store Store
@@ -46,84 +47,90 @@ func (r *Runner) Run(ctx context.Context) error {
 
 // handle traite un lot dans cet ordre précis :
 //
-//  1. décoder, en écartant les messages inexploitables et les doublons du lot ;
-//  2. interroger la mémoire des identifiants déjà comptés (Seen) et écarter ceux-là ;
-//  3. cumuler les compteurs dans MongoDB (Apply) ;
-//  4. SEULEMENT ALORS mémoriser les identifiants comptés (Mark) ;
-//  5. puis, dans la boucle, valider les offsets.
+//  1. décoder (un message inexploitable est écarté et journalisé, jamais bloquant), en notant la position
+//     (partition, offset) de chaque événement et le dernier offset du lot dans chaque partition ;
+//  2. réserver chaque événement pour le message qui le porte (dedupe.Claim) : un événement déjà réservé par un
+//     AUTRE message est un doublon, écarté ;
+//  3. écrire dans MongoDB, en UNE transaction, les compteurs des événements que la position de leur partition ne
+//     couvre pas encore, et les nouvelles positions (Store.Apply) ;
+//  4. puis, dans la boucle, valider les offsets dans Kafka.
 //
-// Un crash entre 3 et 4 fait recompter ce lot (doublon) ; un crash entre 4 et 5 ne fait rien recompter,
-// car les identifiants sont déjà mémorisés. Inverser 3 et 4 ferait l'inverse : des événements perdus.
+// Un crash à n'importe quel moment ne fait ni perdre ni compter deux fois : avant 3, le lot relu retrouve ses propres
+// réservations et compte ses événements ; après 3, le lot relu est entièrement couvert par les positions et
+// n'ajoute rien. Deux instances qui traitent le même lot pendant un rééquilibrage se heurtent sur le document de
+// position : MongoDB n'en laisse passer qu'une.
 func (r *Runner) handle(ctx context.Context, msgs []kafka.Message) error {
 	start := time.Now()
 	retry := batch.RetryPolicy{MaxAttempts: r.cfg.MaxAttempts, Backoff: r.cfg.RetryBackoff}
 
-	events, skipped, batchDuplicates := r.decode(msgs)
+	candidates, upTo, skipped := r.decode(msgs)
 
-	keys := make([]dedupe.Key, len(events))
-	for i, e := range events {
-		keys[i] = dedupeKey(e)
+	keys := make([]dedupe.Key, len(candidates))
+	owners := make([]string, len(candidates))
+	for i, c := range candidates {
+		keys[i] = dedupeKey(c.Event)
+		owners[i] = ownerOf(c)
 	}
 
-	var seen []bool
+	var claimed []string
 	if len(keys) > 0 {
-		err := retry.Do(ctx, r.log, "check seen ids", func() (err error) {
-			seen, err = r.seen.Seen(ctx, keys)
+		err := retry.Do(ctx, r.log, "claim events", func() (err error) {
+			claimed, err = r.seen.Claim(ctx, keys, owners)
 			return err
 		})
 		if err != nil {
-			return fmt.Errorf("check seen ids: %w", err)
+			return fmt.Errorf("claim events: %w", err)
 		}
 	}
 
-	var fresh []event.Enriched
-	var freshKeys []dedupe.Key
-	for i, e := range events {
-		if !seen[i] {
-			fresh = append(fresh, e)
-			freshKeys = append(freshKeys, keys[i])
+	mine := make([]Counted, 0, len(candidates))
+	for i, c := range candidates {
+		if claimed[i] == owners[i] {
+			mine = append(mine, c)
 		}
 	}
-	duplicates := batchDuplicates + len(events) - len(fresh)
+	duplicates := len(candidates) - len(mine)
 
-	buckets := Aggregate(fresh)
-	if len(buckets) > 0 {
-		applyOnce := func() error {
-			start := time.Now()
-			defer func() { r.cfg.Metrics.observeApply(time.Since(start)) }()
-			return r.store.Apply(ctx, buckets)
-		}
-		if err := retry.Do(ctx, r.log, "apply counters", applyOnce); err != nil {
-			return fmt.Errorf("apply counters: %w", err)
-		}
-		writtenAt := time.Now() // les compteurs sont visibles dans MongoDB à partir de cet instant
-		if err := retry.Do(ctx, r.log, "mark counted ids", func() error { return r.seen.Mark(ctx, freshKeys) }); err != nil {
-			return fmt.Errorf("mark counted ids: %w", err)
-		}
-		r.cfg.Metrics.observeLatency(fresh, writtenAt)
+	// Retenter est sûr : l'écriture est idempotente, même si un essai précédent a abouti sans qu'on le sache.
+	var applied Applied
+	err := retry.Do(ctx, r.log, "apply counters", func() (err error) {
+		start := time.Now()
+		defer func() { r.cfg.Metrics.observeApply(time.Since(start)) }()
+		applied, err = r.store.Apply(ctx, mine, upTo)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("apply counters: %w", err)
 	}
+	writtenAt := time.Now() // les compteurs sont visibles dans MongoDB à partir de cet instant
+	replayed := len(mine) - len(applied.Events)
 
-	r.cfg.Metrics.observeBatch(len(fresh), duplicates, skipped, len(buckets))
+	r.cfg.Metrics.observeLatency(applied.Events, writtenAt)
+	r.cfg.Metrics.observeBatch(len(applied.Events), duplicates, skipped, replayed, applied.Buckets)
 
 	r.log.Debug("batch aggregated",
 		slog.Int("messages", len(msgs)),
-		slog.Int("counted", len(fresh)),
+		slog.Int("counted", len(applied.Events)),
 		slog.Int("duplicates", duplicates),
+		slog.Int("replayed", replayed),
 		slog.Int("skipped", skipped),
-		slog.Int("buckets", len(buckets)),
+		slog.Int("buckets", applied.Buckets),
 		slog.Float64("took_ms", float64(time.Since(start).Microseconds())/1000),
 	)
 	return nil
 }
 
-// decode transforme les messages en événements. Un message inexploitable est écarté et journalisé, mais
-// n'arrête jamais le flux : il sera validé avec le reste du lot. Ce serait sinon un "message poison" qui
-// bloquerait l'aggregator pour toujours. Les doublons à l'intérieur du lot (même site, même identifiant) sont
-// écartés (le premier gagne).
-func (r *Runner) decode(msgs []kafka.Message) (events []event.Enriched, skipped, duplicates int) {
-	inBatch := make(map[dedupe.Key]bool, len(msgs))
-
+// decode transforme les messages en événements positionnés. Un message inexploitable est écarté et journalisé, mais
+// n'arrête jamais le flux : il sera validé avec le reste du lot (ce serait sinon un "message poison" qui bloquerait
+// l'aggregator pour toujours). upTo donne, pour chaque partition, l'offset du dernier message du lot.
+func (r *Runner) decode(msgs []kafka.Message) (events []Counted, upTo map[Partition]int64, skipped int) {
+	upTo = make(map[Partition]int64)
 	for _, m := range msgs {
+		p := Partition{Topic: m.Topic, ID: m.Partition}
+		if last, known := upTo[p]; !known || m.Offset > last {
+			upTo[p] = m.Offset
+		}
+
 		e, err := Decode(m.Value)
 		if err != nil {
 			skipped++
@@ -132,19 +139,18 @@ func (r *Runner) decode(msgs []kafka.Message) (events []event.Enriched, skipped,
 				slog.Int64("offset", m.Offset), slog.Any("error", err))
 			continue
 		}
-		k := dedupeKey(e)
-		if inBatch[k] {
-			duplicates++
-			continue
-		}
-		inBatch[k] = true
-		events = append(events, e)
+		events = append(events, Counted{Event: e, From: p, Offset: m.Offset})
 	}
-	return events, skipped, duplicates
+	return events, upTo, skipped
 }
 
 // dedupeKey identifie un événement pour le dédoublonnage. L'identifiant vient du client et n'est unique qu'au sein
 // d'un site : le site fait partie de la clé, sinon le même identifiant envoyé par deux sites ne serait compté qu'une fois.
 func dedupeKey(e event.Enriched) dedupe.Key {
 	return dedupe.Key{SiteID: e.SiteID, EventID: e.ID}
+}
+
+// ownerOf identifie le message qui porte un événement : c'est lui qui le comptera s'il le réserve le premier.
+func ownerOf(c Counted) string {
+	return c.From.Topic + "/" + strconv.Itoa(c.From.ID) + ":" + strconv.FormatInt(c.Offset, 10)
 }

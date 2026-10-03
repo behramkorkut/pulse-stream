@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -38,10 +39,11 @@ func (c *callLog) get() []string {
 
 // fakeSource délivre des messages puis attend l'annulation, comme un topic sans nouveau message.
 type fakeSource struct {
-	mu      sync.Mutex
-	pending []kafka.Message
-	commits []kafka.Message
-	calls   *callLog
+	mu         sync.Mutex
+	pending    []kafka.Message
+	commits    []kafka.Message
+	calls      *callLog
+	failCommit bool // simule un crash juste avant la validation des offsets
 }
 
 func (s *fakeSource) FetchMessage(ctx context.Context) (kafka.Message, error) {
@@ -60,6 +62,9 @@ func (s *fakeSource) FetchMessage(ctx context.Context) (kafka.Message, error) {
 func (s *fakeSource) CommitMessages(_ context.Context, msgs ...kafka.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failCommit {
+		return errors.New("arrêt simulé avant la validation des offsets")
+	}
 	s.commits = append(s.commits, msgs...)
 	s.calls.add("commit")
 	return nil
@@ -71,25 +76,36 @@ func (s *fakeSource) committed() int {
 	return len(s.commits)
 }
 
-// fakeStore enregistre les buckets reçus. failFirst échoue les N premiers appels (tous si < 0).
+// fakeStore se comporte comme le magasin MongoDB : chaque Apply est atomique (le verrou joue le rôle de la
+// transaction) et ne compte que ce que les positions ne couvrent pas encore. failFirst échoue les N premiers appels
+// (tous si < 0), AVANT toute écriture.
 type fakeStore struct {
 	mu        sync.Mutex
 	applied   [][]Bucket
+	positions map[Partition]int64
 	calls     int
 	failFirst int
 	log       *callLog
 }
 
-func (s *fakeStore) Apply(_ context.Context, buckets []Bucket) error {
+func (s *fakeStore) Apply(_ context.Context, events []Counted, upTo map[Partition]int64) (Applied, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
 	if s.failFirst < 0 || s.calls <= s.failFirst {
-		return errors.New("mongo indisponible")
+		return Applied{}, errors.New("mongo indisponible")
 	}
+	if s.positions == nil {
+		s.positions = map[Partition]int64{}
+	}
+	fresh := NotYetApplied(events, s.positions)
+	for p, offset := range Advanced(upTo, s.positions) {
+		s.positions[p] = offset
+	}
+	buckets := Aggregate(fresh)
 	s.applied = append(s.applied, buckets)
 	s.log.add("apply")
-	return nil
+	return Applied{Events: fresh, Buckets: len(buckets)}, nil
 }
 
 // totals additionne les compteurs de tous les buckets appliqués, tous appels confondus.
@@ -113,25 +129,19 @@ func (s *fakeStore) applyCalls() int {
 	return len(s.applied)
 }
 
-// recordingSeen décore une mémoire des doublons pour tracer les marquages et simuler des pannes.
+// recordingSeen décore la mémoire des doublons pour tracer les réservations et simuler une panne de Redis.
 type recordingSeen struct {
 	dedupe.Store
-	log     *callLog
-	failSee bool
-	marks   int
+	log       *callLog
+	failClaim bool
 }
 
-func (r *recordingSeen) Seen(ctx context.Context, keys []dedupe.Key) ([]bool, error) {
-	if r.failSee {
+func (r *recordingSeen) Claim(ctx context.Context, keys []dedupe.Key, owners []string) ([]string, error) {
+	if r.failClaim {
 		return nil, errors.New("redis indisponible")
 	}
-	return r.Store.Seen(ctx, keys)
-}
-
-func (r *recordingSeen) Mark(ctx context.Context, keys []dedupe.Key) error {
-	r.marks++
-	r.log.add("mark")
-	return r.Store.Mark(ctx, keys)
+	r.log.add("claim")
+	return r.Store.Claim(ctx, keys, owners)
 }
 
 func msgFor(t *testing.T, offset int64, e event.Enriched) kafka.Message {
@@ -214,8 +224,8 @@ func TestRunnerCountsEventsAndCommits(t *testing.T) {
 	}
 }
 
-// Garantie centrale : compter, PUIS mémoriser les identifiants, PUIS valider les offsets.
-func TestRunnerAppliesThenMarksThenCommits(t *testing.T) {
+// Ordre des étapes : réserver, PUIS écrire (compteurs et positions ensemble), PUIS valider les offsets.
+func TestRunnerClaimsThenAppliesThenCommits(t *testing.T) {
 	r := newRig([]kafka.Message{msgFor(t, 0, human("e1", "site-42", event.TypePageview, "desktop", "chrome", 0, true))}, testConfig())
 	stop := r.start(t)
 
@@ -225,7 +235,7 @@ func TestRunnerAppliesThenMarksThenCommits(t *testing.T) {
 	}
 
 	got := r.calls.get()
-	want := []string{"apply", "mark", "commit"}
+	want := []string{"claim", "apply", "commit"}
 	if len(got) < 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
 		t.Errorf("ordre des appels = %v, want %v", got, want)
 	}
@@ -308,29 +318,46 @@ func TestRunnerRetriesTransientStoreFailure(t *testing.T) {
 	}
 }
 
-// Si les compteurs ne sont pas écrits, on ne doit ni mémoriser les identifiants (sinon la relecture
-// les ignorerait : événements perdus) ni valider les offsets.
-func TestRunnerDoesNotMarkNorCommitWhenTheStoreKeepsFailing(t *testing.T) {
-	r := newRig([]kafka.Message{msgFor(t, 0, human("e1", "site-42", event.TypePageview, "desktop", "chrome", 0, true))}, testConfig())
-	r.store.failFirst = -1
+// Les événements sont réservés AVANT l'écriture. Si l'écriture échoue, rien n'est validé, et à la relecture le
+// message retrouve sa propre réservation : l'événement est compté, une fois, y compris quand une copie plus loin
+// dans la partition (renvoi du client) arrive entre-temps.
+func TestRunnerCountsAfterAFailedWriteWhenTheBatchIsReplayed(t *testing.T) {
+	view := human("e1", "site-42", event.TypePageview, "desktop", "chrome", 0, true)
+	calls := &callLog{}
+	store := &fakeStore{log: calls, failFirst: -1}
+	memory := dedupe.NewMemory() // le Redis partagé par les deux "vies"
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	// Le délai évite qu'un Run() fautif (qui masquerait l'erreur) fasse attendre le test indéfiniment.
+	// Première vie : réserve e1, puis le magasin reste indisponible jusqu'à l'abandon.
+	first := &fakeSource{pending: []kafka.Message{msgFor(t, 0, view)}, calls: calls}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := r.runner.Run(ctx); err == nil || ctx.Err() != nil {
+	if err := NewRunner(first, store, memory, testConfig(), log).Run(ctx); err == nil || ctx.Err() != nil {
 		t.Fatalf("Run() = %v, want une erreur remontée avant le délai (le magasin est indisponible)", err)
 	}
-	if r.seen.marks != 0 {
-		t.Errorf("%d marquages : les identifiants ne doivent pas être mémorisés si rien n'a été écrit", r.seen.marks)
+	if n := first.committed(); n != 0 {
+		t.Fatalf("%d offsets validés : les messages seraient perdus", n)
 	}
-	if n := r.src.committed(); n != 0 {
-		t.Errorf("%d offsets validés : les messages seraient perdus", n)
+
+	// Seconde vie : le magasin répond. Kafka redonne le message 0, suivi d'une copie de e1 (offset 1).
+	store.mu.Lock()
+	store.failFirst = 0
+	store.mu.Unlock()
+	second := &fakeSource{pending: []kafka.Message{msgFor(t, 0, view), msgFor(t, 1, view)}, calls: calls}
+	stop := startRunner(t, NewRunner(second, store, memory, testConfig(), log))
+	waitFor(t, "les 2 offsets validés", func() bool { return second.committed() == 2 })
+	if err := stop(); err != nil {
+		t.Fatalf("seconde vie : Run() error = %v", err)
+	}
+
+	if pv, _, _, _ := store.totals(); pv != 1 {
+		t.Errorf("pageviews = %d, want 1 : ni perdu (réservé avant l'échec), ni compté deux fois (copie)", pv)
 	}
 }
 
-func TestRunnerDoesNotCountWhenTheSeenCheckFails(t *testing.T) {
+func TestRunnerDoesNotCountWhenTheClaimFails(t *testing.T) {
 	r := newRig([]kafka.Message{msgFor(t, 0, human("e1", "site-42", event.TypePageview, "desktop", "chrome", 0, true))}, testConfig())
-	r.seen.failSee = true
+	r.seen.failClaim = true
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -362,7 +389,7 @@ func TestRunnerCountsEventsByOutcome(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	for outcome, want := range map[string]float64{"counted": 2, "duplicate": 1, "skipped": 1} {
+	for outcome, want := range map[string]float64{"counted": 2, "duplicate": 1, "replayed": 0, "skipped": 1} {
 		if got := testutil.ToFloat64(m.events.WithLabelValues(outcome)); got != want {
 			t.Errorf("issue %q = %v, want %v", outcome, got, want)
 		}
@@ -421,60 +448,101 @@ func TestRunnerObservesEndToEndLatency(t *testing.T) {
 
 func TestMetricsSeriesExistAtZeroFromTheStart(t *testing.T) {
 	m := NewMetrics(prometheus.NewRegistry())
-	if got := testutil.CollectAndCount(m.events); got != 3 {
-		t.Errorf("séries pulse_aggregator_events_total = %d, want 3 (counted, duplicate, skipped)", got)
+	if got := testutil.CollectAndCount(m.events); got != 4 {
+		t.Errorf("séries pulse_aggregator_events_total = %d, want 4 (counted, duplicate, replayed, skipped)", got)
 	}
 }
 
-// failingMark simule la panne de l'étape 4 : les compteurs viennent d'être écrits dans MongoDB, mais le
-// processus s'arrête avant d'avoir mémorisé les identifiants (et donc avant de valider les offsets).
-type failingMark struct{ dedupe.Store }
-
-func (failingMark) Mark(context.Context, []dedupe.Key) error {
-	return errors.New("arrêt simulé entre Apply et Mark")
-}
-
-// LIMITE CONNUE, documentée dans docs/architecture.md et docs/resilience.md : ce test ne vérifie pas un
-// comportement souhaité, il le MESURE. Un crash pile entre l'écriture MongoDB (Apply) et la mémorisation
-// des identifiants (Mark) laisse le lot non validé : Kafka le redonne à l'instance suivante, qui ne le
-// reconnaît pas comme déjà compté et l'ajoute une seconde fois.
-//
-// Si cette limite est un jour corrigée (écriture idempotente), ce test devra échouer : on le remplacera alors
-// par un test qui exige un seul comptage.
-func TestKnownLimitCrashBetweenApplyAndMarkCountsTheBatchTwice(t *testing.T) {
-	msgs := []kafka.Message{msgFor(t, 0, human("e1", "site-42", event.TypePageview, "desktop", "chrome", 0, true))}
-	calls := &callLog{}
-	store := &fakeStore{log: calls} // le MongoDB partagé par les deux "vies" du programme
-	memory := dedupe.NewMemory()    // le Redis partagé par les deux "vies"
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	cfg := testConfig()
-	cfg.MaxAttempts = 1 // pas de nouvel essai : la panne est définitive pour cette vie
-
-	// Première vie : écrit les compteurs, puis "meurt" avant Mark et avant le commit.
-	first := &fakeSource{pending: append([]kafka.Message(nil), msgs...), calls: calls}
-	if err := NewRunner(first, store, failingMark{Store: memory}, cfg, log).Run(context.Background()); err == nil {
-		t.Fatal("la première vie aurait dû s'arrêter sur une erreur")
-	}
-	if first.committed() != 0 {
-		t.Fatalf("offsets validés = %d, want 0 : le lot ne doit pas être validé", first.committed())
-	}
-	if pv, _, _, _ := store.totals(); pv != 1 {
-		t.Fatalf("après la première vie, pageviews = %d, want 1", pv)
-	}
-
-	// Seconde vie : Kafka redonne le même message (rien n'a été validé), la mémoire des doublons ne le connaît pas.
-	second := &fakeSource{pending: append([]kafka.Message(nil), msgs...), calls: calls}
-	runner := NewRunner(second, store, memory, cfg, log)
+// startRunner lance un runner en arrière-plan ; stop l'arrête et retourne son erreur.
+func startRunner(t *testing.T, runner *Runner) (stop func() error) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- runner.Run(ctx) }()
-	waitFor(t, "le lot relu est validé", func() bool { return second.committed() == 1 })
-	cancel()
-	if err := <-done; err != nil {
+	return func() error {
+		cancel()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(5 * time.Second):
+			t.Fatal("Run ne s'est pas arrêté après l'annulation")
+			return nil
+		}
+	}
+}
+
+// Ancienne limite connue, désormais corrigée : un crash APRÈS l'écriture des compteurs mais AVANT la validation
+// des offsets faisait recompter le lot à la relecture. Les positions, écrites dans la même transaction que les
+// compteurs, couvrent maintenant le lot rejoué : il n'ajoute rien.
+func TestCrashAfterWritingDoesNotCountTheBatchTwice(t *testing.T) {
+	msgs := []kafka.Message{
+		msgFor(t, 0, human("e1", "site-42", event.TypePageview, "desktop", "chrome", 0, true)),
+		msgFor(t, 1, human("e2", "site-42", event.TypeClick, "desktop", "chrome", time.Second, false)),
+	}
+	calls := &callLog{}
+	store := &fakeStore{log: calls} // le MongoDB partagé par les deux "vies" du programme
+	memory := dedupe.NewMemory()    // le Redis partagé
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := testConfig()
+	cfg.MaxAttempts = 1
+	cfg.BatchSize = 2 // les deux messages dans le même lot
+
+	// Première vie : écrit les compteurs, puis "meurt" avant de valider les offsets.
+	first := &fakeSource{pending: append([]kafka.Message(nil), msgs...), calls: calls, failCommit: true}
+	if err := NewRunner(first, store, memory, cfg, log).Run(context.Background()); err == nil {
+		t.Fatal("la première vie aurait dû s'arrêter sur l'échec de la validation")
+	}
+	if pv, clicks, _, _ := store.totals(); pv != 1 || clicks != 1 {
+		t.Fatalf("après la première vie : pv %d clics %d, want 1 1", pv, clicks)
+	}
+
+	// Seconde vie : Kafka redonne le même lot (rien n'a été validé).
+	second := &fakeSource{pending: append([]kafka.Message(nil), msgs...), calls: calls}
+	m := NewMetrics(prometheus.NewRegistry())
+	cfg.Metrics = m
+	stop := startRunner(t, NewRunner(second, store, memory, cfg, log))
+	waitFor(t, "le lot relu est validé", func() bool { return second.committed() == 2 })
+	if err := stop(); err != nil {
 		t.Fatalf("seconde vie : Run() error = %v", err)
 	}
 
-	if pv, _, _, _ := store.totals(); pv != 2 {
-		t.Errorf("pageviews = %d : la limite connue prévoit un double comptage (2). Si c'est 1, elle est corrigée : mettre ce test à jour", pv)
+	if pv, clicks, _, _ := store.totals(); pv != 1 || clicks != 1 {
+		t.Errorf("pv %d clics %d, want 1 1 : le lot rejoué a été compté une seconde fois", pv, clicks)
+	}
+	if got := testutil.ToFloat64(m.events.WithLabelValues("replayed")); got != 2 {
+		t.Errorf("issue replayed = %v, want 2 (les deux messages étaient déjà couverts par la position)", got)
+	}
+}
+
+// La course mesurée pendant les tests de panne : pendant un rééquilibrage, deux instances traitent les mêmes
+// messages en même temps. Toutes deux se reconnaissent propriétaires (même message) ; l'écriture atomique avec
+// les positions n'en laisse compter qu'une.
+func TestTwoInstancesOnTheSameMessagesCountThemOnce(t *testing.T) {
+	var msgs []kafka.Message
+	for i := 0; i < 40; i++ {
+		e := human(fmt.Sprintf("e%02d", i), "site-42", event.TypePageview, "desktop", "chrome", time.Duration(i)*time.Second, i == 0)
+		msgs = append(msgs, msgFor(t, int64(i), e))
+	}
+	calls := &callLog{}
+	store := &fakeStore{log: calls}
+	memory := dedupe.NewMemory()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := testConfig()
+	cfg.BatchSize = 7 // des lots qui ne s'alignent pas : les deux instances se chevauchent de façon variée
+
+	a := &fakeSource{pending: append([]kafka.Message(nil), msgs...), calls: calls}
+	b := &fakeSource{pending: append([]kafka.Message(nil), msgs...), calls: calls}
+	stopA := startRunner(t, NewRunner(a, store, memory, cfg, log))
+	stopB := startRunner(t, NewRunner(b, store, memory, cfg, log))
+	waitFor(t, "les deux instances ont tout validé", func() bool { return a.committed() == 40 && b.committed() == 40 })
+	if err := stopA(); err != nil {
+		t.Fatal(err)
+	}
+	if err := stopB(); err != nil {
+		t.Fatal(err)
+	}
+
+	if pv, _, _, sessions := store.totals(); pv != 40 || sessions != 1 {
+		t.Errorf("pageviews = %d, sessions = %d, want 40 et 1 : des messages ont été comptés par les deux instances", pv, sessions)
 	}
 }
