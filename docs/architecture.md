@@ -152,8 +152,9 @@ la seconde livraison (`replayed`). Dans le **même** lot, les deux exemplaires o
 partition, même offset) : la réservation les reconnaît tous les deux, et la position, lue au début de la transaction,
 ne couvre ni l'un ni l'autre. Le message était compté deux fois. Le décodage ne garde plus qu'un exemplaire de chaque
 position et compte les autres dans l'issue `redelivered` (avec une ligne de journal). Test :
-`TestRunnerCountsOnceAMessageRedeliveredInTheSameBatch` (8 pageviews pour 5 avant la correction). Les runs de panne
-restent à refaire : écart nul attendu, avec un `redelivered` non nul pendant les pannes.
+`TestRunnerCountsOnceAMessageRedeliveredInTheSameBatch` (8 pageviews pour 5 avant la correction). Runs de panne
+refaits (`docs/resilience.md`, runs 13 et 14) : exacts en crash et en arrêt propre, avec un `redelivered` non nul
+pendant les pannes, comme prévu.
 
 Limites et coûts, à documenter honnêtement :
 

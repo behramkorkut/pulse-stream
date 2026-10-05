@@ -11,15 +11,16 @@ Kubernetes, with metrics, a versioned dashboard, a fixed-rate load generator, a 
 a throwaway cluster, and a failure test that kills pods with SIGKILL under load.
 
 The property I cared about most is that **an accepted event is counted exactly once**. I verified it end to end
-after every load run. In the failure tests it held for loss (no event lost in 9 recorded runs) and did **not** hold
-for duplicates (2 runs over-counted, by 0.013 % and 0.0006 %). I first measured it, found the likely cause and wrote
+after every load run. In the failure tests it held for loss (no event lost in any of 13 recorded runs) and at first
+did **not** hold for duplicates (2 runs over-counted, by 0.013 % and 0.0006 %). I first measured it, found the likely cause and wrote
 down the fix; I then implemented it: the processed Kafka offset of each partition is stored in the same MongoDB
 transaction as the counters, and the duplicate memory reserves each event for the message that carries it instead of
 marking it afterwards. Unit tests, an integration test with two concurrent transactions on a real MongoDB and a
 randomized simulation all count exactly once. The first failure runs after it still over-counted (+20 and +75 events
 out of about 362,000). An audit tool comparing the Kafka topic with MongoDB located the excess in the aggregator, and
-the cause was a case none of my tests produced: the same message delivered twice in one batch after a rebalance. It is
-fixed and tested; the failure runs that would confirm it are still to be redone.
+the cause was a case none of my tests produced: the same message delivered twice in one batch after a rebalance. With
+that fixed, the next crash and graceful runs were exact, and a new metric showed those redeliveries happening (about
+30 and 58 in two 5-minute windows) without being counted twice.
 
 ## What worked
 
@@ -88,7 +89,8 @@ position read at the start of the transaction covers neither: the message was co
 integration test and my 20,000-scenario simulation all modelled a redelivery as a new batch. What found it: an audit
 (`make k8s-audit`) showing that the topic matched the generator exactly while MongoDB did not, with the excess in the
 minutes of the kills, then the way kafka-go resumes a partition after a rebalance. A unit test reproduced it (8
-pageviews for 5) before the fix. Lesson: a simulation only covers the delivery patterns I thought of; derive them from
+pageviews for 5) before the fix. I wrote the prediction before rerunning (no difference, non-zero `redelivered`), and it
+held. Lesson: a simulation only covers the delivery patterns I thought of; derive them from
 the client's actual behaviour, and build the tool that says where a number goes wrong before guessing why.
 
 **A smaller one.** The Docker builder in my environment did not support BuildKit cache mounts, so a Dockerfile
@@ -97,18 +99,19 @@ written for BuildKit failed locally; I removed the mounts so it builds with both
 ## What I would and would not claim
 
 I would claim: no event lost across all recorded runs; the pipeline recovers from SIGKILL of any consumer;
-reliable lag metrics; reproducible measurements (`make` targets, scripts and commands are in the repository).
+exact counts in the aggregator failure runs after the last fix, with the mechanism of the last over-count observed
+and neutralized; reliable lag metrics; reproducible measurements (`make` targets, scripts and commands are in the
+repository).
 
-I would not claim yet: exactly-once counting under real failures (the last cause found is fixed and tested, but the
-failure runs that would confirm it are not redone yet); production-scale throughput (one laptop, generator and cluster share the
-cores); statistical significance for the failure runs (9 runs, random timing); anything about per-session counters
+I would not claim yet: proven exactly-once counting under failures (two exact runs cannot rule out a rarer cause, and
+two runs were exact before the last fix too); production-scale throughput (one laptop, generator and cluster share the
+cores); statistical significance for the failure runs (13 runs, random timing); anything about per-session counters
 (not checked by the end-to-end test).
 
 ## What I would do next
 
-1. **Redo the failure runs** with the fix for the same-batch redelivery. Prediction: no difference, and a non-zero
-   `redelivered` count during the kills. A persisting difference with `redelivered` at zero would mean the cause is
-   elsewhere.
+1. **More failure runs**, starting with the processor crash run (the processor changed since its last one), enough
+   per configuration to put a confidence interval on "exact".
 2. **Cooperative rebalancing.** The client I used moves every partition away from every member on each rebalance. A
    client supporting the cooperative protocol would move only what is needed, shrinking the window for the race.
 3. **Lag measured outside the consumers**, so the metric survives the death of the consumer it measures. Today the

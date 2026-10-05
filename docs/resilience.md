@@ -1,7 +1,7 @@
 # Résilience : ce que les pannes ont montré
 
 Ce document rapporte les tests de panne faits sur le déploiement Kubernetes (kind) : ce qui a été mesuré, ce qui a
-été corrigé, et ce qui reste faux ou non démontré. Les chiffres viennent de runs réels du 2 octobre 2026.
+été corrigé, et ce qui reste faux ou non démontré. Les chiffres viennent de runs réels du 2 et du 5 octobre 2026.
 
 ## Question posée
 
@@ -154,8 +154,23 @@ un lot, compte les autres dans une nouvelle issue `redelivered` de `pulse_aggreg
 journal (`messages delivered twice in the same batch`). Le test `TestRunnerCountsOnceAMessageRedeliveredInTheSameBatch`
 reproduit le cas : 8 pageviews pour 5 avant la correction, 5 après.
 
-**Runs 11 et 12 à refaire.** Prédiction écrite avant la mesure : écart nul, et `redelivered` non nul pendant les
-pannes. Un écart qui persiste avec `redelivered` à zéro voudrait dire que la cause est ailleurs.
+**Runs avec cette correction** (version `86eba6c`, même protocole) :
+
+| # | Programme | Mode | Résultat |
+|---|---|---|---|
+| 13 | aggregator (3) | crash, 6 pannes | exact (274 262 pageviews, 68 947 clics, 18 073 robots) |
+| 14 | aggregator (3) | arrêt propre, 6 pannes | exact (274 664 pageviews, 69 023 clics, 18 108 robots) |
+
+La prédiction, écrite avant la mesure, était : écart nul, et `redelivered` non nul pendant les pannes (un écart qui
+persiste avec `redelivered` à zéro aurait voulu dire que la cause était ailleurs). Les deux se vérifient. Deux relevés
+de `sum by (outcome) (increase(pulse_aggregator_events_total[5m]))` pendant ces runs donnent environ 30 et 58 messages
+`redelivered` (valeurs extrapolées par `increase`, sur des fenêtres de 5 min qui ne coïncident pas exactement avec les
+runs) : le même ordre de grandeur que les surcomptages des runs 11 et 12 (+20 et +75). Avec l'ancien code, chacun de
+ces messages aurait été compté deux fois.
+
+Ce que cela démontre, et pas plus : la cause trouvée était réelle, et elle est fermée. Deux runs exacts ne prouvent
+pas l'absence d'une cause plus rare : les runs 5 et 8 étaient exacts eux aussi, avec l'ancien code. Reste à refaire
+le run processor en crash (le processor a changé depuis le run 9 : mémoire des sessions, règle `too_late`).
 
 Un run intermédiaire, écarté : le cluster faisait encore tourner les images de la veille. L'écart (+1 832) était
 exactement le nombre d'événements « trop en retard » que l'ancien processor comptait au lieu de les rejeter. Depuis,
@@ -163,8 +178,8 @@ exactement le nombre d'événements « trop en retard » que l'ancien processor 
 
 ## Pistes, par ordre de priorité
 
-1. ~~**Écriture idempotente.**~~ Faite, puis complétée (message livré deux fois dans un lot), voir ci-dessus ; reste
-   à refaire les runs de panne.
+1. ~~**Écriture idempotente.**~~ Faite, puis complétée (message livré deux fois dans un lot) : runs 13 et 14 exacts.
+   Reste le run processor en crash.
 2. **Rééquilibrage coopératif.** Avec le protocole actuel de `kafka-go`, un rééquilibrage retire toutes les partitions
    à tous les membres ; un client prenant en charge le protocole coopératif (par exemple `franz-go`) ne déplace que le
    nécessaire, ce qui réduit les occasions de course.

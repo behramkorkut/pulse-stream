@@ -32,15 +32,28 @@ case "$MODE" in graceful | crash) ;; *) echo "mode inconnu : $MODE (graceful ou 
 
 # Garde-fou : le cluster doit faire tourner le code local. Un run de panne sur des images périmées mesure l'ancienne
 # version. C'est arrivé : un processor sans la règle too_late comptait les événements trop en retard, et l'écart
-# (+1 832) ressemblait à du double comptage. Chaque programme écrit sa version dans son journal au démarrage.
-expected="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+# (+1 832) ressemblait à du double comptage. Chaque programme écrit sa version (le commit de son image) dans son
+# journal au démarrage. Une image est à jour si ce qui entre dans sa construction n'a pas changé depuis ce commit :
+# modifier la documentation ou ce script n'oblige pas à reconstruire.
+IMAGE_INPUTS="go.mod go.sum Dockerfile cmd internal"
+
+# code_differs <version> : vrai si le code local diffère de celui de cette version (ou si on ne peut pas le savoir).
+code_differs() {
+  case "$1" in "" | dev | *-dirty) return 0 ;; esac   # version inconnue, ou image construite depuis du code non commité
+  git rev-parse --quiet --verify "$1^{commit}" >/dev/null || return 0
+  # shellcheck disable=SC2086 # IMAGE_INPUTS est une liste de chemins
+  git diff --quiet "$1" -- $IMAGE_INPUTS || return 0                         # fichiers suivis modifiés
+  # shellcheck disable=SC2086
+  [ -n "$(git ls-files --others --exclude-standard -- $IMAGE_INPUTS)" ]   # nouveaux fichiers pas encore suivis
+}
+
 stale=""
 for app in collector processor aggregator; do
   running="$(kubectl logs --namespace "$NS" "deployment/$app" 2>/dev/null | grep -o '"version":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
-  [ "$running" = "$expected" ] || stale="$stale $app=${running:-inconnue}"
+  if code_differs "$running"; then stale="$stale $app=${running:-inconnue}"; fi
 done
 if [ -n "$stale" ] && [ "${ALLOW_STALE:-0}" != 1 ]; then
-  echo "Le cluster ne fait pas tourner le code local ($expected) :$stale" >&2
+  echo "Le cluster ne fait pas tourner le code local ($IMAGE_INPUTS) :$stale" >&2
   echo "Mettre à jour : make docker-build kind-load, make helm-install HELM_ARGS=\"...\", puis" >&2
   echo "  kubectl rollout restart --namespace $NS deployment/collector deployment/processor deployment/aggregator" >&2
   echo "Pour lancer quand même : ALLOW_STALE=1 make k8s-chaos ..." >&2
