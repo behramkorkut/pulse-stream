@@ -17,7 +17,9 @@ down the fix; I then implemented it: the processed Kafka offset of each partitio
 transaction as the counters, and the duplicate memory reserves each event for the message that carries it instead of
 marking it afterwards. Unit tests, an integration test with two concurrent transactions on a real MongoDB and a
 randomized simulation all count exactly once. The first failure runs after it still over-counted (+20 and +75 events
-out of about 362,000): something my tests do not model is still at play, and I am locating it.
+out of about 362,000). An audit tool comparing the Kafka topic with MongoDB located the excess in the aggregator, and
+the cause was a case none of my tests produced: the same message delivered twice in one batch after a rebalance. It is
+fixed and tested; the failure runs that would confirm it are still to be redone.
 
 ## What worked
 
@@ -78,6 +80,17 @@ unchanged on replay. It costs about 200 bytes per human event while the visitor'
 Redis's memory limit in the chart. Lesson: test an idempotence claim by replaying sequences, not single calls, and make sure the test data
 actually contains the case the claim is about.
 
+**My tests delivered each message at most once per batch; Kafka does not.** After each rebalance, kafka-go restarts
+every partition at the committed offset, while my read loop is ahead (a 200-message channel fills while the previous
+batch is written). Messages already read are delivered again. In a later batch, the stored position covers them. In
+the same batch, both copies carry the same owner (same partition and offset), both pass the reservation, and the
+position read at the start of the transaction covers neither: the message was counted twice. My unit tests, my
+integration test and my 20,000-scenario simulation all modelled a redelivery as a new batch. What found it: an audit
+(`make k8s-audit`) showing that the topic matched the generator exactly while MongoDB did not, with the excess in the
+minutes of the kills, then the way kafka-go resumes a partition after a rebalance. A unit test reproduced it (8
+pageviews for 5) before the fix. Lesson: a simulation only covers the delivery patterns I thought of; derive them from
+the client's actual behaviour, and build the tool that says where a number goes wrong before guessing why.
+
 **A smaller one.** The Docker builder in my environment did not support BuildKit cache mounts, so a Dockerfile
 written for BuildKit failed locally; I removed the mounts so it builds with both builders.
 
@@ -86,15 +99,16 @@ written for BuildKit failed locally; I removed the mounts so it builds with both
 I would claim: no event lost across all recorded runs; the pipeline recovers from SIGKILL of any consumer;
 reliable lag metrics; reproducible measurements (`make` targets, scripts and commands are in the repository).
 
-I would not claim yet: exactly-once counting under real failures (exact in tests, but the failure runs after the fix
-still over-count slightly); production-scale throughput (one laptop, generator and cluster share the
+I would not claim yet: exactly-once counting under real failures (the last cause found is fixed and tested, but the
+failure runs that would confirm it are not redone yet); production-scale throughput (one laptop, generator and cluster share the
 cores); statistical significance for the failure runs (9 runs, random timing); anything about per-session counters
 (not checked by the end-to-end test).
 
 ## What I would do next
 
-1. **Locate the remaining over-count** (`make k8s-audit` compares the topic to MongoDB), fix it, and repeat the
-   failure runs.
+1. **Redo the failure runs** with the fix for the same-batch redelivery. Prediction: no difference, and a non-zero
+   `redelivered` count during the kills. A persisting difference with `redelivered` at zero would mean the cause is
+   elsewhere.
 2. **Cooperative rebalancing.** The client I used moves every partition away from every member on each rebalance. A
    client supporting the cooperative protocol would move only what is needed, shrinking the window for the race.
 3. **Lag measured outside the consumers**, so the metric survives the death of the consumer it measures. Today the

@@ -11,7 +11,7 @@ import (
 
 // Metrics mesure ce que l'aggregator fait des messages. Un *Metrics nil est valide (no-op).
 type Metrics struct {
-	events  *prometheus.CounterVec // messages lus, par issue (counted | duplicate | replayed | skipped)
+	events  *prometheus.CounterVec // messages lus, par issue (counted | duplicate | redelivered | replayed | skipped)
 	buckets prometheus.Counter     // documents (site, minute) mis à jour dans MongoDB
 	apply   prometheus.Histogram   // durée de chaque appel à MongoDB
 	latency prometheus.Histogram   // fraîcheur : de la réception par le collector à l'écriture dans MongoDB
@@ -23,7 +23,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	m := &Metrics{
 		events: f.NewCounterVec(prometheus.CounterOpts{
 			Name: "pulse_aggregator_events_total",
-			Help: "Messages lus par l'aggregator, par issue : comptés, doublons écartés, déjà écrits (lot rejoué), inexploitables.",
+			Help: "Messages lus par l'aggregator, par issue : comptés, doublons écartés, livrés deux fois dans un lot, déjà écrits (lot rejoué), inexploitables.",
 		}, []string{"outcome"}),
 		buckets: f.NewCounter(prometheus.CounterOpts{
 			Name: "pulse_aggregator_buckets_written_total",
@@ -42,27 +42,31 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 	}
 
 	// Séries créées à zéro dès le départ (voir batch.NewMetrics : "No data" et première incrémentation perdue).
-	for _, outcome := range []string{"counted", "duplicate", "replayed", "skipped"} {
+	for _, outcome := range []string{"counted", "duplicate", "redelivered", "replayed", "skipped"} {
 		m.events.WithLabelValues(outcome)
 	}
 	return m
 }
 
+// outcomes répartit les messages d'un lot selon ce que l'aggregator en a fait.
+type outcomes struct {
+	counted     int // comptés dans MongoDB
+	duplicates  int // réservés par un autre message (renvoi du client, relecture par le processor)
+	redelivered int // le même message livré une seconde fois dans le lot (rééquilibrage) : gardé une fois
+	replayed    int // déjà couverts par la position de leur partition (lot rejoué) : l'écriture idempotente travaille
+	skipped     int // inexploitables
+}
+
 // observeBatch est appelée une fois le lot écrit : on ne compte que ce qui est acquis.
-//
-//   - counted : comptés dans MongoDB ;
-//   - duplicate : réservés par un autre message (renvoi du client, relecture par le processor) ;
-//   - replayed : message déjà couvert par la position de sa partition (lot rejoué après un crash ou un
-//     rééquilibrage) : c'est l'écriture idempotente qui travaille ;
-//   - skipped : message inexploitable.
-func (m *Metrics) observeBatch(counted, duplicates, skipped, replayed, buckets int) {
+func (m *Metrics) observeBatch(o outcomes, buckets int) {
 	if m == nil {
 		return
 	}
-	m.events.WithLabelValues("counted").Add(float64(counted))
-	m.events.WithLabelValues("duplicate").Add(float64(duplicates))
-	m.events.WithLabelValues("replayed").Add(float64(replayed))
-	m.events.WithLabelValues("skipped").Add(float64(skipped))
+	m.events.WithLabelValues("counted").Add(float64(o.counted))
+	m.events.WithLabelValues("duplicate").Add(float64(o.duplicates))
+	m.events.WithLabelValues("redelivered").Add(float64(o.redelivered))
+	m.events.WithLabelValues("replayed").Add(float64(o.replayed))
+	m.events.WithLabelValues("skipped").Add(float64(o.skipped))
 	m.buckets.Add(float64(buckets))
 }
 

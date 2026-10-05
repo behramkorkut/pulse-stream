@@ -122,11 +122,40 @@ pendant 150 s, environ 362 000 événements comptés par run.
 | 11 | aggregator (3) | crash, 6 pannes | **+20 événements** (+13 pageviews, +7 clics), soit 0,005 % |
 | 12 | aggregator (3) | arrêt propre, 6 pannes | **+75 événements** (+61 pageviews, +12 clics, +2 robots), soit 0,02 % |
 
-**Le double comptage n'est pas éliminé.** Les tests unitaires, le test d'intégration (deux transactions concurrentes
-sur un vrai MongoDB) et la simulation comptent juste : quelque chose que ces tests ne modélisent pas reste en jeu.
-Hypothèse non vérifiée à ce stade ; l'outil `make k8s-audit` compare le topic `enriched-events` du cluster aux
-compteurs MongoDB, document par document, pour dire si l'écart naît en amont de l'aggregator ou dans l'aggregator,
-et s'il touche des événements reçus en plusieurs exemplaires.
+**Le double comptage n'était pas éliminé.** Les tests unitaires, le test d'intégration (deux transactions
+concurrentes sur un vrai MongoDB) et la simulation comptaient juste : quelque chose qu'ils ne modélisaient pas
+restait en jeu.
+
+**Audit du run 12.** `make k8s-audit` relit le topic `enriched-events` du cluster depuis le début de la charge et le
+compare aux compteurs MongoDB, document (site, minute) par document :
+
+| | pageviews | clics | robots |
+|---|---|---|---|
+| attendu par le générateur | 274 877 | 69 086 | 18 113 |
+| `enriched-events`, chaque événement une fois | 274 877 | 69 086 | 18 113 |
+| MongoDB | 274 938 | 69 098 | 18 115 |
+
+Le topic concorde exactement avec le générateur : l'écart naît dans l'aggregator. Il touche 10 documents sur les
+trois sites : les trois minutes des pannes (11:51 à 11:53 UTC) et deux minutes d'une heure plus tôt, qui ne reçoivent
+que des événements en retard (+1 chacune). 369 406 messages pour 362 076 événements ; aucun événement sur deux
+partitions.
+
+**Cause : le même message deux fois dans un lot.** À chaque rééquilibrage, kafka-go reprend chaque partition à
+l'offset *validé*. Or la boucle de lecture a de l'avance : un canal de 200 messages se remplit pendant que le lot
+précédent s'écrit. Les messages déjà lus mais pas encore validés sont donc livrés une seconde fois. Quand les deux
+livraisons tombent dans des lots différents, la position enregistrée couvre la seconde. Quand elles tombent dans le
+**même** lot, elles ont le même propriétaire (même partition, même offset) : la réservation les accepte toutes les
+deux, la position lue au début de la transaction ne couvre ni l'une ni l'autre, et le message est compté deux fois.
+Aucun de mes tests ni la simulation ne livrait deux fois un offset dans le même lot. Les +1 isolés dans des minutes
+anciennes s'expliquent de la même façon : un événement en retard livré deux fois dans un lot compte dans sa minute.
+
+**Correction (5 octobre 2026)** : le décodage ne garde qu'un exemplaire de chaque position (partition, offset) dans
+un lot, compte les autres dans une nouvelle issue `redelivered` de `pulse_aggregator_events_total`, et l'écrit dans le
+journal (`messages delivered twice in the same batch`). Le test `TestRunnerCountsOnceAMessageRedeliveredInTheSameBatch`
+reproduit le cas : 8 pageviews pour 5 avant la correction, 5 après.
+
+**Runs 11 et 12 à refaire.** Prédiction écrite avant la mesure : écart nul, et `redelivered` non nul pendant les
+pannes. Un écart qui persiste avec `redelivered` à zéro voudrait dire que la cause est ailleurs.
 
 Un run intermédiaire, écarté : le cluster faisait encore tourner les images de la veille. L'écart (+1 832) était
 exactement le nombre d'événements « trop en retard » que l'ancien processor comptait au lieu de les rejeter. Depuis,
@@ -134,7 +163,8 @@ exactement le nombre d'événements « trop en retard » que l'ancien processor 
 
 ## Pistes, par ordre de priorité
 
-1. ~~**Écriture idempotente.**~~ Faite, voir ci-dessus ; reste à refaire les runs de panne.
+1. ~~**Écriture idempotente.**~~ Faite, puis complétée (message livré deux fois dans un lot), voir ci-dessus ; reste
+   à refaire les runs de panne.
 2. **Rééquilibrage coopératif.** Avec le protocole actuel de `kafka-go`, un rééquilibrage retire toutes les partitions
    à tous les membres ; un client prenant en charge le protocole coopératif (par exemple `franz-go`) ne déplace que le
    nécessaire, ce qui réduit les occasions de course.
@@ -154,4 +184,10 @@ kubectl rollout restart --namespace pulse deployment/collector deployment/proces
 make k8s-chaos APP=aggregator MODE=crash KILLS=6 INTERVAL=20 RATES=2500 DURATION=150s
 make k8s-chaos APP=aggregator MODE=graceful KILLS=6 INTERVAL=20 RATES=2500 DURATION=150s
 make k8s-chaos APP=processor MODE=crash KILLS=6 INTERVAL=20 RATES=2500 DURATION=150s
+
+# Un run en écart : où naît-il ? (topic enriched-events face à MongoDB, document par document)
+make k8s-audit
 ```
+
+Pendant les pannes, `sum by (outcome) (increase(pulse_aggregator_events_total[5m]))` dans Prometheus montre les
+messages livrés deux fois dans un lot (`redelivered`) et les lots rejoués (`replayed`).

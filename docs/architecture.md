@@ -82,7 +82,8 @@ site et par minute (`_id = site|2026-09-30T11:00Z`) avec les compteurs `pageview
 fois**, malgré les crashs, les rééquilibrages et les doublons. Chaque lot suit cet ordre :
 
 1. **décoder** (un message inexploitable est écarté et journalisé, jamais bloquant), en notant la position
-   (partition, offset) de chaque événement et le dernier offset du lot dans chaque partition ;
+   (partition, offset) de chaque événement et le dernier offset du lot dans chaque partition. Un message livré deux
+   fois dans le lot (même position) n'est gardé qu'une fois ;
 2. **réserver** chaque événement (site + identifiant) dans Redis pour le message qui le porte (`topic/partition:offset`),
    par un script Lua atomique, TTL de 90 min (voir « Événements en retard »). Le premier message qui réserve un
    événement en est le propriétaire ; un événement déjà réservé par un *autre* message est un doublon, écarté ;
@@ -104,12 +105,17 @@ Pourquoi c'est exact, quel que soit le moment d'un crash :
   l'événement réservé par un autre message et l'écarte, même si ce propriétaire n'a pas encore écrit : il sera relu
   et l'écrira.
 - *Un nouvel essai après une erreur ambiguë* (la transaction a peut-être abouti) : idempotent pour la même raison.
+- *Le même message deux fois dans un lot* (rééquilibrage, voir la dernière correction ci-dessous) : la position ne
+  protège que d'un lot à l'autre ; le décodage garde un seul exemplaire et compte l'autre dans `redelivered`.
 
-Les messages d'une partition arrivent dans l'ordre et Kafka ne valide un offset qu'après l'écriture : la position
+Kafka ne valide un offset qu'après l'écriture, et une lecture reprend toujours à l'offset validé : la position
 enregistrée est donc toujours au moins égale à l'offset validé, et tout offset inférieur à la position a été traité.
-Ce schéma a été vérifié par une simulation aléatoire (deux consommateurs, crashs entre toutes les étapes, validations
-Kafka qui reculent, doublons à des offsets différents) : 20 000 scénarios exacts sur 20 000, quand l'ancien schéma
-(vérifier, écrire, puis mémoriser) en ratait les trois quarts dans le même simulateur.
+Les messages d'une partition arrivent dans l'ordre, à une exception près : après un rééquilibrage, kafka-go redonne
+des messages déjà lus. Ce schéma a été vérifié par une simulation aléatoire (deux consommateurs, crashs entre toutes
+les étapes, validations Kafka qui reculent, doublons à des offsets différents) : 20 000 scénarios exacts sur 20 000,
+quand l'ancien schéma (vérifier, écrire, puis mémoriser) en ratait les trois quarts dans le même simulateur. La
+simulation ne livrait jamais deux fois un offset dans le même lot : c'est le trou que les tests de panne ont révélé
+ensuite.
 
 Le temps utilisé est celui de l'**événement** : un événement en retard tombe dans la bonne minute. Les robots
 n'alimentent que `bot_events`. Les clés des répartitions sont filtrées sur une liste blanche (sinon `other`) :
@@ -135,6 +141,19 @@ recompter le lot, et deux instances pendant un rééquilibrage consultaient Redi
 les deux. Tests : `TestCrashAfterWritingDoesNotCountTheBatchTwice` (remplace l'ancien test qui *mesurait* la limite),
 `TestTwoInstancesOnTheSameMessagesCountThemOnce`, `TestRunnerCountsAfterAFailedWriteWhenTheBatchIsReplayed`, et, sur
 un vrai MongoDB, `TestMongoConcurrentApplyOfTheSameBatchCountsOnce` (deux transactions concurrentes sur le même lot).
+
+**Correction : un message livré deux fois dans le même lot.** Après la correction précédente, les tests de panne
+surcomptaient encore (+20 et +75 événements sur 362 000, `docs/resilience.md`). `make k8s-audit` a situé l'écart dans
+l'aggregator : le topic `enriched-events` concordait exactement avec le générateur, MongoDB non, et l'excédent suivait
+les pannes. Cause : à chaque rééquilibrage, kafka-go reprend chaque partition à l'offset **validé**, alors que la
+boucle de lecture a de l'avance (un canal de 200 messages se remplit pendant que le lot précédent s'écrit). Les
+messages lus mais pas encore validés sont donc livrés une seconde fois. Dans deux lots différents, la position couvre
+la seconde livraison (`replayed`). Dans le **même** lot, les deux exemplaires ont le même propriétaire (même
+partition, même offset) : la réservation les reconnaît tous les deux, et la position, lue au début de la transaction,
+ne couvre ni l'un ni l'autre. Le message était compté deux fois. Le décodage ne garde plus qu'un exemplaire de chaque
+position et compte les autres dans l'issue `redelivered` (avec une ligne de journal). Test :
+`TestRunnerCountsOnceAMessageRedeliveredInTheSameBatch` (8 pageviews pour 5 avant la correction). Les runs de panne
+restent à refaire : écart nul attendu, avec un `redelivered` non nul pendant les pannes.
 
 Limites et coûts, à documenter honnêtement :
 
@@ -257,7 +276,7 @@ Le trafic de supervision est ainsi séparé du trafic métier. Les métriques ut
 | `pulse_consumer_lag{consumer}` | jauge | messages publiés mais pas encore validés par le groupe, **somme de toutes les partitions** |
 | `pulse_processor_events_total{outcome}` | compteur | écrits : `enriched` ou `dead_letter` |
 | `pulse_processor_dead_letters_total{reason}` | compteur | rejets par raison (`invalid_json`, `invalid_event`, `encode_error`, `too_late`) |
-| `pulse_aggregator_events_total{outcome}` | compteur | `counted`, `duplicate`, `replayed` (déjà couvert par la position : lot rejoué), `skipped` |
+| `pulse_aggregator_events_total{outcome}` | compteur | `counted`, `duplicate`, `redelivered` (même message deux fois dans un lot : rééquilibrage), `replayed` (déjà couvert par la position : lot rejoué), `skipped` |
 | `pulse_aggregator_buckets_written_total` | compteur | documents (site, minute) mis à jour |
 | `pulse_aggregator_store_duration_seconds` | histogramme | durée d'un appel MongoDB |
 | `pulse_end_to_end_latency_seconds` | histogramme | **fraîcheur** : de la réception par le collector à l'écriture des compteurs dans MongoDB |

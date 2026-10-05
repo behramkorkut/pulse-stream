@@ -448,8 +448,8 @@ func TestRunnerObservesEndToEndLatency(t *testing.T) {
 
 func TestMetricsSeriesExistAtZeroFromTheStart(t *testing.T) {
 	m := NewMetrics(prometheus.NewRegistry())
-	if got := testutil.CollectAndCount(m.events); got != 4 {
-		t.Errorf("séries pulse_aggregator_events_total = %d, want 4 (counted, duplicate, replayed, skipped)", got)
+	if got := testutil.CollectAndCount(m.events); got != 5 {
+		t.Errorf("séries pulse_aggregator_events_total = %d, want 5 (counted, duplicate, redelivered, replayed, skipped)", got)
 	}
 }
 
@@ -544,5 +544,45 @@ func TestTwoInstancesOnTheSameMessagesCountThemOnce(t *testing.T) {
 
 	if pv, _, _, sessions := store.totals(); pv != 40 || sessions != 1 {
 		t.Errorf("pageviews = %d, sessions = %d, want 40 et 1 : des messages ont été comptés par les deux instances", pv, sessions)
+	}
+}
+
+// Régression mesurée pendant les tests de panne (+20 en crash, +75 en arrêt propre, voir docs/postmortem.md). À
+// chaque rééquilibrage, kafka-go reprend chaque partition à l'offset VALIDÉ, alors que les messages suivants ont
+// peut-être déjà été lus et attendent dans le canal de batch.Run : ils sont livrés une seconde fois. Quand les deux
+// livraisons tombent dans le même lot, elles portent le même propriétaire (même partition, même offset) : toutes deux
+// se reconnaissaient dans la réservation, et la position, lue avant le lot, ne couvrait ni l'une ni l'autre.
+func TestRunnerCountsOnceAMessageRedeliveredInTheSameBatch(t *testing.T) {
+	view := func(id string, at time.Duration) event.Enriched {
+		return human(id, "site-42", event.TypePageview, "desktop", "chrome", at, id == "e0")
+	}
+	elsewhere := msgFor(t, 0, view("f0", 0)) // même offset que e0, mais sur une autre partition : un autre message
+	elsewhere.Partition = 1
+
+	cfg := testConfig()
+	cfg.BatchSize, cfg.BatchWait = 8, time.Second // les 8 livraisons dans un seul lot
+	m := NewMetrics(prometheus.NewRegistry())
+	cfg.Metrics = m
+	r := newRig([]kafka.Message{
+		msgFor(t, 0, view("e0", 0)), msgFor(t, 1, view("e1", time.Second)), msgFor(t, 2, view("e2", 2*time.Second)),
+		elsewhere,
+		// Rééquilibrage : la partition 0 reprend à l'offset validé (0 : rien n'est encore validé).
+		msgFor(t, 0, view("e0", 0)), msgFor(t, 1, view("e1", time.Second)), msgFor(t, 2, view("e2", 2*time.Second)),
+		msgFor(t, 3, view("e3", 3*time.Second)),
+	}, cfg)
+	stop := r.start(t)
+
+	waitFor(t, "les 8 livraisons validées", func() bool { return r.src.committed() == 8 })
+	if err := stop(); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if pv, _, _, sessions := r.store.totals(); pv != 5 || sessions != 1 {
+		t.Errorf("pageviews = %d, sessions = %d, want 5 et 1 (e0 à e3, f0) : un message livré deux fois a été compté deux fois", pv, sessions)
+	}
+	for outcome, want := range map[string]float64{"counted": 5, "redelivered": 3, "duplicate": 0, "replayed": 0} {
+		if got := testutil.ToFloat64(m.events.WithLabelValues(outcome)); got != want {
+			t.Errorf("issue %q = %v, want %v", outcome, got, want)
+		}
 	}
 }

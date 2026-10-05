@@ -22,9 +22,11 @@ or on Kubernetes (kind + Helm), is observable with Prometheus and Grafana, and i
 - **Failure testing with honest results.** 9 recorded runs killing processors and aggregators under load (SIGKILL
   included): **no event lost** in any run; a rare **over-count** (up to 0.013 %) in 2 runs, traced to the
   non-atomic duplicate check between instances during a rebalance. An idempotent write now passes unit, integration
-  and randomized tests, **but the first failure runs after it still over-count** (0.005 % and 0.02 %): under
-  investigation. Everything, including my own wrong assumptions, is in [docs/resilience.md](docs/resilience.md)
-  and [docs/postmortem.md](docs/postmortem.md).
+  and randomized tests, **but the first failure runs after it still over-counted** (0.005 % and 0.02 %). An audit
+  of the Kafka topic against MongoDB located it in the aggregator: after a rebalance, the same message can arrive
+  twice **in one batch**, a case none of my tests produced. Fixed and tested; the failure runs that would confirm it
+  are still to be redone. Everything, including my own wrong assumptions, is in
+  [docs/resilience.md](docs/resilience.md) and [docs/postmortem.md](docs/postmortem.md).
 - **A production-style delivery chain.** Static distroless non-root images (19.6–35.4 MB), a Helm chart with
   probes, resource limits and a strict `securityContext`, Prometheus pod discovery, and a CI job that deploys
   the whole thing on a throwaway kind cluster and checks the counters.
@@ -50,7 +52,8 @@ Key decisions, with their reasons, are in [docs/architecture.md](docs/architectu
 - **At-least-once delivery, exactly-once counting.** Offsets are committed only after processing, so a crash replays
   a batch and never loses one. The aggregator makes the replay harmless: it stores each partition's processed offset
   in the **same MongoDB transaction** as the counters and only counts what lies beyond it, and it reserves each event
-  for the message that carries it (Redis, atomic Lua) to drop copies arriving at other offsets.
+  for the message that carries it (Redis, atomic Lua) to drop copies arriving at other offsets. A message delivered
+  twice within one batch (it happens after every rebalance) is kept once.
 - **Partition key = site + visitor**, so one visitor's events stay ordered, which sessionization needs.
 - **Open-loop load generation** (fixed rate, latency measured from the intended send time), so a slow server cannot
   hide its own saturation (coordinated omission).
@@ -136,7 +139,8 @@ Details, method and mistakes: [docs/resilience.md](docs/resilience.md).
 | Events lost | none, in all 9 recorded runs |
 | Over-counting | 2 runs out of 9, +49 events (0.013 %) and +2 events (0.0006 %) |
 | Kafka session timeout 30 s → 10 s | consumer lag after a crash ~10× lower, cascading restarts gone |
-| Fix (after these runs) | processed offset stored in the same MongoDB transaction as the counters; exact in tests, still +0.005 % (crash) and +0.02 % (graceful) in the first failure runs: under investigation |
+| Fix (after these runs) | processed offset stored in the same MongoDB transaction as the counters; exact in tests, still +0.005 % (crash) and +0.02 % (graceful) in the first failure runs |
+| Cause of the remainder | same message delivered twice in one batch after a rebalance (`make k8s-audit`); fixed and tested, failure runs to redo |
 
 ## Repository layout
 
@@ -171,9 +175,9 @@ GitHub Actions. Integration tests share one infrastructure, so each test package
 ## Known limits
 
 - One machine, one Kubernetes node, generator and cluster competing for the same cores.
-- **Not exactly-once yet under real failures**: the idempotent write is exact in tests but the failure runs still show
-  a small over-count (0.005 % to 0.02 %), cause not yet located. It relies on MongoDB transactions, so MongoDB runs
-  as a single-node replica set.
+- **Exactly-once under real failures not yet confirmed**: the last over-count found (0.005 % to 0.02 %) has a
+  located cause and a tested fix, but the failure runs have not been redone since. It relies on MongoDB
+  transactions, so MongoDB runs as a single-node replica set.
 - Infrastructure (Redpanda, MongoDB, Redis) runs as single, non-persistent instances in the chart.
 - The processor and aggregator health probes only prove the process answers on `/metrics`; they do not check
   Kafka or MongoDB connectivity.

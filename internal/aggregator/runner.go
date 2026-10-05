@@ -48,7 +48,8 @@ func (r *Runner) Run(ctx context.Context) error {
 // handle traite un lot dans cet ordre précis :
 //
 //  1. décoder (un message inexploitable est écarté et journalisé, jamais bloquant), en notant la position
-//     (partition, offset) de chaque événement et le dernier offset du lot dans chaque partition ;
+//     (partition, offset) de chaque événement et le dernier offset du lot dans chaque partition. Un message livré
+//     deux fois dans le lot (même position) n'est gardé qu'une fois ;
 //  2. réserver chaque événement pour le message qui le porte (dedupe.Claim) : un événement déjà réservé par un
 //     AUTRE message est un doublon, écarté ;
 //  3. écrire dans MongoDB, en UNE transaction, les compteurs des événements que la position de leur partition ne
@@ -58,12 +59,17 @@ func (r *Runner) Run(ctx context.Context) error {
 // Un crash à n'importe quel moment ne fait ni perdre ni compter deux fois : avant 3, le lot relu retrouve ses propres
 // réservations et compte ses événements ; après 3, le lot relu est entièrement couvert par les positions et
 // n'ajoute rien. Deux instances qui traitent le même lot pendant un rééquilibrage se heurtent sur le document de
-// position : MongoDB n'en laisse passer qu'une.
+// position : MongoDB n'en laisse passer qu'une. Une même instance qui reçoit deux fois un message dans le même lot
+// (voir decode) le garde une fois.
 func (r *Runner) handle(ctx context.Context, msgs []kafka.Message) error {
 	start := time.Now()
 	retry := batch.RetryPolicy{MaxAttempts: r.cfg.MaxAttempts, Backoff: r.cfg.RetryBackoff}
 
-	candidates, upTo, skipped := r.decode(msgs)
+	candidates, upTo, redelivered, skipped := r.decode(msgs)
+	if redelivered > 0 {
+		r.log.Info("messages delivered twice in the same batch (consumer group rebalance), kept once",
+			slog.Int("redelivered", redelivered), slog.Int("messages", len(msgs)))
+	}
 
 	keys := make([]dedupe.Key, len(candidates))
 	owners := make([]string, len(candidates))
@@ -106,12 +112,15 @@ func (r *Runner) handle(ctx context.Context, msgs []kafka.Message) error {
 	replayed := len(mine) - len(applied.Events)
 
 	r.cfg.Metrics.observeLatency(applied.Events, writtenAt)
-	r.cfg.Metrics.observeBatch(len(applied.Events), duplicates, skipped, replayed, applied.Buckets)
+	r.cfg.Metrics.observeBatch(outcomes{
+		counted: len(applied.Events), duplicates: duplicates, redelivered: redelivered, replayed: replayed, skipped: skipped,
+	}, applied.Buckets)
 
 	r.log.Debug("batch aggregated",
 		slog.Int("messages", len(msgs)),
 		slog.Int("counted", len(applied.Events)),
 		slog.Int("duplicates", duplicates),
+		slog.Int("redelivered", redelivered),
 		slog.Int("replayed", replayed),
 		slog.Int("skipped", skipped),
 		slog.Int("buckets", applied.Buckets),
@@ -123,10 +132,23 @@ func (r *Runner) handle(ctx context.Context, msgs []kafka.Message) error {
 // decode transforme les messages en événements positionnés. Un message inexploitable est écarté et journalisé, mais
 // n'arrête jamais le flux : il sera validé avec le reste du lot (ce serait sinon un "message poison" qui bloquerait
 // l'aggregator pour toujours). upTo donne, pour chaque partition, l'offset du dernier message du lot.
-func (r *Runner) decode(msgs []kafka.Message) (events []Counted, upTo map[Partition]int64, skipped int) {
+//
+// Un message déjà présent dans le lot (même partition, même offset) est écarté et compté dans redelivered. Cela
+// arrive à chaque rééquilibrage : kafka-go reprend alors chaque partition à l'offset VALIDÉ, et redonne des messages
+// déjà lus qui attendent encore dans le canal de batch.Run, ou dans ce lot. Les deux livraisons auraient le même
+// propriétaire dans la réservation, et la position, lue avant d'écrire le lot, ne couvrirait ni l'une ni l'autre :
+// le message serait compté deux fois. Une seconde livraison dans un lot SUIVANT, elle, est couverte par la position.
+func (r *Runner) decode(msgs []kafka.Message) (events []Counted, upTo map[Partition]int64, redelivered, skipped int) {
 	upTo = make(map[Partition]int64)
+	delivered := make(map[delivery]struct{}, len(msgs))
 	for _, m := range msgs {
 		p := Partition{Topic: m.Topic, ID: m.Partition}
+		at := delivery{From: p, Offset: m.Offset}
+		if _, again := delivered[at]; again {
+			redelivered++
+			continue
+		}
+		delivered[at] = struct{}{}
 		if last, known := upTo[p]; !known || m.Offset > last {
 			upTo[p] = m.Offset
 		}
@@ -141,7 +163,13 @@ func (r *Runner) decode(msgs []kafka.Message) (events []Counted, upTo map[Partit
 		}
 		events = append(events, Counted{Event: e, From: p, Offset: m.Offset})
 	}
-	return events, upTo, skipped
+	return events, upTo, redelivered, skipped
+}
+
+// delivery est la position d'un message : elle l'identifie dans le topic.
+type delivery struct {
+	From   Partition
+	Offset int64
 }
 
 // dedupeKey identifie un événement pour le dédoublonnage. L'identifiant vient du client et n'est unique qu'au sein
