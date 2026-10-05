@@ -21,7 +21,7 @@ CHART        := deploy/helm/pulse-stream
 HELM_FILES   := --set-file monitoring.dashboards.pulse-stream=deploy/grafana/dashboards/pulse-stream.json
 LDFLAGS := -X $(MODULE)/internal/version.Version=$(VERSION)
 
-.PHONY: help doctor fmt fmt-check vet test cover ci test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic load dashboard topics consume group group-aggregator up down ps logs docker-build docker-images app-up app-down app-logs kind-up kind-down kind-load kind-status helm-lint helm-template helm-install helm-uninstall k8s-pods k8s-smoke k8s-mongo k8s-dashboard k8s-load k8s-load-verify k8s-chaos k8s-redeploy
+.PHONY: help doctor fmt fmt-check vet test cover ci test-integration build clean run-collector run-processor run-aggregator smoke poison sessions demo-sessions aggregates demo-dedupe metrics traffic load dashboard topics consume group group-aggregator up down ps logs docker-build docker-images app-up app-down app-logs kind-up kind-down kind-load kind-status helm-lint helm-template helm-install helm-uninstall k8s-pods k8s-smoke k8s-mongo k8s-dashboard k8s-load k8s-load-verify k8s-chaos k8s-audit k8s-redeploy
 
 help: ## Affiche cette aide
 	grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
@@ -193,6 +193,15 @@ k8s-load-verify: build ## Charge sur le cluster AVEC verification exacte dans Mo
 
 k8s-chaos: build ## Test de panne : make k8s-chaos APP=aggregator MODE=crash KILLS=6 INTERVAL=40 RATES=2000 DURATION=120s
 	bash scripts/k8s-chaos.sh $(APP) $(MODE) $(KILLS) $(INTERVAL) -rates $(RATES) -duration $(DURATION) -workers $(WORKERS)
+
+k8s-audit: build ## Localise un ecart de la derniere charge (bench/last-run.json) : enriched-events du cluster face a MongoDB
+	@run=$$(sed -n 's/.*"run_id": "\([0-9]*\)".*/\1/p' bench/last-run.json); \
+	kubectl port-forward --namespace $(NAMESPACE) mongo-0 27018:27017 >/dev/null 2>&1 & echo $$! > .pf.pid; \
+	sleep 3; \
+	echo "Lecture d'enriched-events depuis le debut de la charge $$run (une a deux minutes)..."; \
+	kubectl exec --namespace $(NAMESPACE) redpanda-0 -- rpk topic consume enriched-events -o "@$${run}000:end" -f '%p %o %v\n' \
+	  | ./bin/audit -report bench/last-run.json; \
+	status=$$?; kill $$(cat .pf.pid) 2>/dev/null; rm -f .pf.pid; exit $$status
 
 k8s-redeploy: ## Reconstruit les 3 images, les recharge dans kind et redemarre les 3 programmes (apres un changement de code)
 	$(MAKE) docker-build IMAGES="$(KUBE_IMAGES)"

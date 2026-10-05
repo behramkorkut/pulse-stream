@@ -21,8 +21,9 @@ or on Kubernetes (kind + Helm), is observable with Prometheus and Grafana, and i
   run, and exits non-zero on any difference.
 - **Failure testing with honest results.** 9 recorded runs killing processors and aggregators under load (SIGKILL
   included): **no event lost** in any run; a rare **over-count** (up to 0.013 %) in 2 runs, traced to the
-  non-atomic duplicate check between instances during a rebalance, **then fixed** with an idempotent write (failure
-  runs to be repeated). Everything, including my own wrong assumptions, is in [docs/resilience.md](docs/resilience.md)
+  non-atomic duplicate check between instances during a rebalance. An idempotent write now passes unit, integration
+  and randomized tests, **but the first failure runs after it still over-count** (0.005 % and 0.02 %): under
+  investigation. Everything, including my own wrong assumptions, is in [docs/resilience.md](docs/resilience.md)
   and [docs/postmortem.md](docs/postmortem.md).
 - **A production-style delivery chain.** Static distroless non-root images (19.6–35.4 MB), a Helm chart with
   probes, resource limits and a strict `securityContext`, Prometheus pod discovery, and a CI job that deploys
@@ -135,7 +136,7 @@ Details, method and mistakes: [docs/resilience.md](docs/resilience.md).
 | Events lost | none, in all 9 recorded runs |
 | Over-counting | 2 runs out of 9, +49 events (0.013 %) and +2 events (0.0006 %) |
 | Kafka session timeout 30 s → 10 s | consumer lag after a crash ~10× lower, cascading restarts gone |
-| Fix (after these runs) | processed offset stored in the same MongoDB transaction as the counters; unit, integration and randomized tests count exactly once; failure runs to be repeated |
+| Fix (after these runs) | processed offset stored in the same MongoDB transaction as the counters; exact in tests, still +0.005 % (crash) and +0.02 % (graceful) in the first failure runs: under investigation |
 
 ## Repository layout
 
@@ -170,8 +171,9 @@ GitHub Actions. Integration tests share one infrastructure, so each test package
 ## Known limits
 
 - One machine, one Kubernetes node, generator and cluster competing for the same cores.
-- Exactly-once counting is designed and tested, but the failure runs that measured the old over-count have not been
-  repeated yet. It relies on MongoDB transactions, so MongoDB runs as a single-node replica set.
+- **Not exactly-once yet under real failures**: the idempotent write is exact in tests but the failure runs still show
+  a small over-count (0.005 % to 0.02 %), cause not yet located. It relies on MongoDB transactions, so MongoDB runs
+  as a single-node replica set.
 - Infrastructure (Redpanda, MongoDB, Redis) runs as single, non-persistent instances in the chart.
 - The processor and aggregator health probes only prove the process answers on `/metrics`; they do not check
   Kafka or MongoDB connectivity.

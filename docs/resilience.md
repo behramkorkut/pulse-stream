@@ -113,9 +113,24 @@ fenêtre Apply → Mark (`TestKnownLimitCrashBetweenApplyAndMarkCountsTheBatchTw
 exige un seul comptage, plus un test de deux instances concurrentes et un test de deux transactions concurrentes
 sur un vrai MongoDB.
 
-**Ce qui reste à démontrer** : les neuf runs ci-dessus ont été faits avec l'ancienne version. Il faut les refaire
-avec la nouvelle (commandes ci-dessous) avant d'affirmer « aucun double comptage » sous panne réelle ; la métrique
-`pulse_aggregator_events_total{outcome="replayed"}` montrera les lots rejoués que les positions ont neutralisés.
+**Premiers runs avec la correction (5 octobre 2026)** : même protocole, 3 processors et 3 aggregators, 2 500 req/s
+pendant 150 s, environ 362 000 événements comptés par run.
+
+| # | Programme | Mode | Résultat |
+|---|---|---|---|
+| 10 | aucun (`make k8s-load-verify`, 2 000 req/s, 30 s) | sans panne | exact |
+| 11 | aggregator (3) | crash, 6 pannes | **+20 événements** (+13 pageviews, +7 clics), soit 0,005 % |
+| 12 | aggregator (3) | arrêt propre, 6 pannes | **+75 événements** (+61 pageviews, +12 clics, +2 robots), soit 0,02 % |
+
+**Le double comptage n'est pas éliminé.** Les tests unitaires, le test d'intégration (deux transactions concurrentes
+sur un vrai MongoDB) et la simulation comptent juste : quelque chose que ces tests ne modélisent pas reste en jeu.
+Hypothèse non vérifiée à ce stade ; l'outil `make k8s-audit` compare le topic `enriched-events` du cluster aux
+compteurs MongoDB, document par document, pour dire si l'écart naît en amont de l'aggregator ou dans l'aggregator,
+et s'il touche des événements reçus en plusieurs exemplaires.
+
+Un run intermédiaire, écarté : le cluster faisait encore tourner les images de la veille. L'écart (+1 832) était
+exactement le nombre d'événements « trop en retard » que l'ancien processor comptait au lieu de les rejeter. Depuis,
+`scripts/k8s-chaos.sh` refuse de tester un cluster qui ne fait pas tourner le code local.
 
 ## Pistes, par ordre de priorité
 
