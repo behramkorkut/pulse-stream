@@ -11,16 +11,17 @@ Kubernetes, with metrics, a versioned dashboard, a fixed-rate load generator, a 
 a throwaway cluster, and a failure test that kills pods with SIGKILL under load.
 
 The property I cared about most is that **an accepted event is counted exactly once**. I verified it end to end
-after every load run. In the failure tests it held for loss (no event lost in any of 13 recorded runs) and at first
-did **not** hold for duplicates (2 runs over-counted, by 0.013 % and 0.0006 %). I first measured it, found the likely cause and wrote
-down the fix; I then implemented it: the processed Kafka offset of each partition is stored in the same MongoDB
-transaction as the counters, and the duplicate memory reserves each event for the message that carries it instead of
-marking it afterwards. Unit tests, an integration test with two concurrent transactions on a real MongoDB and a
-randomized simulation all count exactly once. The first failure runs after it still over-counted (+20 and +75 events
-out of about 362,000). An audit tool comparing the Kafka topic with MongoDB located the excess in the aggregator, and
-the cause was a case none of my tests produced: the same message delivered twice in one batch after a rebalance. With
-that fixed, the next crash and graceful runs were exact, and a new metric showed those redeliveries happening (about
-30 and 58 in two 5-minute windows) without being counted twice.
+after every load run. In the failure tests it held for loss (no event lost in any of 14 recorded runs) and at first
+did **not** hold for duplicates (2 runs over-counted, by 0.013 % and 0.0006 %). I first measured it, found the
+likely cause and wrote down the fix; I then implemented it: the processed Kafka offset of each partition is stored
+in the same MongoDB transaction as the counters, and the duplicate memory reserves each event for the message that
+carries it instead of marking it afterwards. Unit tests, an integration test with two concurrent transactions on a
+real MongoDB and a randomized simulation all count exactly once. The first failure runs after it still over-counted
+(+20 and +75 events out of about 362,000). An audit tool comparing the Kafka topic with MongoDB located the excess
+in the aggregator, and the cause was a case none of my tests produced: the same message delivered twice in one batch
+after a rebalance. With that fixed, the next three failure runs (aggregator crash, aggregator graceful, processor
+crash) were exact, and a new metric showed those redeliveries happening (about 30 and 58 in two 5-minute windows)
+without being counted twice.
 
 ## What worked
 
@@ -105,13 +106,13 @@ repository).
 
 I would not claim yet: proven exactly-once counting under failures (two exact runs cannot rule out a rarer cause, and
 two runs were exact before the last fix too); production-scale throughput (one laptop, generator and cluster share the
-cores); statistical significance for the failure runs (13 runs, random timing); anything about per-session counters
+cores); statistical significance for the failure runs (14 runs, random timing); anything about per-session counters
 (not checked by the end-to-end test).
 
 ## What I would do next
 
-1. **More failure runs**, starting with the processor crash run (the processor changed since its last one), enough
-   per configuration to put a confidence interval on "exact".
+1. **More failure runs**, enough per configuration to put a confidence interval on "exact", and an end-to-end check
+   of the per-session counters.
 2. **Cooperative rebalancing.** The client I used moves every partition away from every member on each rebalance. A
    client supporting the cooperative protocol would move only what is needed, shrinking the window for the race.
 3. **Lag measured outside the consumers**, so the metric survives the death of the consumer it measures. Today the

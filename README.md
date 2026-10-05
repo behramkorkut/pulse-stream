@@ -19,11 +19,12 @@ or on Kubernetes (kind + Helm), is observable with Prometheus and Grafana, and i
   when the single aggregator becomes the next bottleneck.
 - **Correctness you can verify.** The load generator compares MongoDB to what the collector accepted, after every
   run, and exits non-zero on any difference.
-- **Failure testing with honest results.** 13 recorded runs killing processors and aggregators under load (SIGKILL
+- **Failure testing with honest results.** 14 recorded runs killing processors and aggregators under load (SIGKILL
   included): **no event lost** in any run. A small **over-count** (0.0006 % to 0.02 %) showed up in 4 runs, and I
   traced it twice: first to a non-atomic duplicate check between instances, then, with an audit of the Kafka topic
   against MongoDB, to the same message arriving twice **in one batch** after a rebalance, a case none of my tests
-  produced. With both fixed, the aggregator crash and graceful runs are **exact**, and a metric shows the
+  produced. With both fixed, the aggregator crash, aggregator graceful and processor crash runs are **exact**, and a
+  metric shows the
   redeliveries happening without being counted twice. Everything, including my own wrong assumptions, is in
   [docs/resilience.md](docs/resilience.md) and [docs/postmortem.md](docs/postmortem.md).
 - **A production-style delivery chain.** Static distroless non-root images (19.6–35.4 MB), a Helm chart with
@@ -135,12 +136,12 @@ Details, method and mistakes: [docs/resilience.md](docs/resilience.md).
 
 | Finding | Result |
 |---|---|
-| Events lost | none, in all 13 recorded failure runs |
+| Events lost | none, in all 14 recorded failure runs |
 | Over-counting, first version | 2 runs out of 9, +49 events (0.013 %) and +2 events (0.0006 %) |
 | Kafka session timeout 30 s → 10 s | consumer lag after a crash ~10× lower, cascading restarts gone |
 | Fix 1 | processed offset stored in the same MongoDB transaction as the counters; exact in tests, still +20 (crash) and +75 (graceful) events in the next failure runs |
 | Fix 2 | same message delivered twice in one batch after a rebalance, located with `make k8s-audit`; kept once |
-| After both fixes | aggregator crash and graceful runs exact (~362,000 events each, 6 kills each); about 30 and 58 same-batch redeliveries observed and neutralized |
+| After both fixes | aggregator crash, aggregator graceful and processor crash runs exact (~362,000 events each, 6 kills each); about 30 and 58 same-batch redeliveries observed and neutralized |
 
 ## Repository layout
 
@@ -176,8 +177,8 @@ GitHub Actions. Integration tests share one infrastructure, so each test package
 
 - One machine, one Kubernetes node, generator and cluster competing for the same cores.
 - **Exactly-once under failures is shown, not proven**: the two failure runs after the last fix are exact, but two
-  runs cannot rule out a rarer cause (two runs were exact before that fix too), and the processor crash run is still
-  to redo. It relies on MongoDB transactions, so MongoDB runs as a single-node replica set.
+  runs cannot rule out a rarer cause (two runs were exact before that fix too). It relies on MongoDB transactions, so
+  MongoDB runs as a single-node replica set.
 - Infrastructure (Redpanda, MongoDB, Redis) runs as single, non-persistent instances in the chart.
 - The processor and aggregator health probes only prove the process answers on `/metrics`; they do not check
   Kafka or MongoDB connectivity.

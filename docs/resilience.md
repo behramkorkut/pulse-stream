@@ -160,6 +160,7 @@ reproduit le cas : 8 pageviews pour 5 avant la correction, 5 après.
 |---|---|---|---|
 | 13 | aggregator (3) | crash, 6 pannes | exact (274 262 pageviews, 68 947 clics, 18 073 robots) |
 | 14 | aggregator (3) | arrêt propre, 6 pannes | exact (274 664 pageviews, 69 023 clics, 18 108 robots) |
+| 15 | processor (3) | crash, 6 pannes | exact (274 881 pageviews, 69 086 clics, 18 113 robots) |
 
 La prédiction, écrite avant la mesure, était : écart nul, et `redelivered` non nul pendant les pannes (un écart qui
 persiste avec `redelivered` à zéro aurait voulu dire que la cause était ailleurs). Les deux se vérifient. Deux relevés
@@ -169,8 +170,10 @@ runs) : le même ordre de grandeur que les surcomptages des runs 11 et 12 (+20 e
 ces messages aurait été compté deux fois.
 
 Ce que cela démontre, et pas plus : la cause trouvée était réelle, et elle est fermée. Deux runs exacts ne prouvent
-pas l'absence d'une cause plus rare : les runs 5 et 8 étaient exacts eux aussi, avec l'ancien code. Reste à refaire
-le run processor en crash (le processor a changé depuis le run 9 : mémoire des sessions, règle `too_late`).
+pas l'absence d'une cause plus rare : les runs 5 et 8 étaient exacts eux aussi, avec l'ancien code. Le run 15 refait
+le processor en crash, qui a changé depuis le run 9 (mémoire des sessions, règle `too_late`) : exact lui aussi, et les
+1 832 événements trop en retard sont restés hors des compteurs. Les compteurs de sessions, eux, ne sont toujours pas
+vérifiés de bout en bout.
 
 Un run intermédiaire, écarté : le cluster faisait encore tourner les images de la veille. L'écart (+1 832) était
 exactement le nombre d'événements « trop en retard » que l'ancien processor comptait au lieu de les rejeter. Depuis,
@@ -178,8 +181,7 @@ exactement le nombre d'événements « trop en retard » que l'ancien processor 
 
 ## Pistes, par ordre de priorité
 
-1. ~~**Écriture idempotente.**~~ Faite, puis complétée (message livré deux fois dans un lot) : runs 13 et 14 exacts.
-   Reste le run processor en crash.
+1. ~~**Écriture idempotente.**~~ Faite, puis complétée (message livré deux fois dans un lot) : runs 13 à 15 exacts.
 2. **Rééquilibrage coopératif.** Avec le protocole actuel de `kafka-go`, un rééquilibrage retire toutes les partitions
    à tous les membres ; un client prenant en charge le protocole coopératif (par exemple `franz-go`) ne déplace que le
    nécessaire, ce qui réduit les occasions de course.
